@@ -27,6 +27,12 @@ void* LoadedImage::find_export(const std::string& sym) const {
     return it == exports.end() ? nullptr : base + it->second;
 }
 
+std::string LoadedImage::forwarder(const std::string& sym) const {
+    uint8_t* a = (uint8_t*)find_export(sym);
+    if (!a || a < base + export_rva || a >= base + export_rva + export_size) return {};
+    return std::string((char*)a);
+}
+
 LoadResult load_pe(const std::vector<uint8_t>& f, const std::string& name, const PlatformHooks& hooks,
                    const ImportResolver& resolve, LoadedImage& out, bool allow_unresolved) {
     LoadResult r;
@@ -80,6 +86,7 @@ LoadResult load_pe(const std::vector<uint8_t>& f, const std::string& name, const
 
     // Exports.
     if (auto ed = dir(DIR_EXPORT); ed.size) {
+        out.export_rva = ed.rva; out.export_size = ed.size;
         auto e = (ExportDir*)(base + ed.rva);
         auto funcs = (uint32_t*)(base + e->funcs); auto names = (uint32_t*)(base + e->names);
         auto ords = (uint16_t*)(base + e->ords);

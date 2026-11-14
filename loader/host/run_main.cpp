@@ -148,7 +148,12 @@ static void trace_file(const char* what, const char* path, bool ok) {
     WriteFile(g_files_h, b, lstrlenA(b), &w, nullptr);
 }
 // Must call ucrtbase's own functions: a FILE* from this exe's CRT is invalid in the game's CRT.
-static FARPROC ucrt(const char* n) { static HMODULE h = LoadLibraryA("ucrtbase.dll"); return GetProcAddress(h, n); }
+static FARPROC ucrt(const char* n) {
+    // Same CRT as the game: our mapped ucrtbase when runtimes are PE-loaded (M4), else Windows' copy.
+    if (auto it = g_loaded.find("ucrtbase.dll"); it != g_loaded.end() && it->second.base)
+        return (FARPROC)it->second.find_export(n);
+    static HMODULE h = LoadLibraryA("ucrtbase.dll"); return GetProcAddress(h, n);
+}
 static FILE* __cdecl shim_fopen(const char* p, const char* m) {
     static auto real = (FILE* (__cdecl*)(const char*, const char*))ucrt("fopen");
     FILE* f = real(p, m); trace_file("fopen", p, f); return f;
@@ -184,9 +189,75 @@ static void WINAPI shim_glClear(unsigned mask) {
     real(mask);
 }
 
-static void* resolve(const std::string& dll, const std::string& sym) {
+// ---- PE image set (M4) -------------------------------------------------------
+// Everything in this set is mapped by OUR loader, never by Windows: the game, the Microsoft
+// C/C++ runtimes and the media/system libraries the game ships. Only the OS layer below them
+// (kernel32, ntdll, user32, gdi32, opengl32, ...) passes through to Windows; that layer is
+// exactly what the PS4 build has to implement. GDPS4_PASSTHROUGH_RUNTIMES=1 restores the M2 setup.
+static std::string g_sys_dir = "C:\\Windows\\System32";
+static std::map<std::string, std::string> pe_set() {
+    std::map<std::string, std::string> m = {
+        {"geometrydash.exe", g_dir}, {"libcocos2d.dll", g_dir}, {"libextensions.dll", g_dir}};
+    if (getenv("GDPS4_PASSTHROUGH_RUNTIMES")) return m;
+    for (auto n : {"ucrtbase.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"}) m[n] = g_sys_dir;
+    for (auto n : {"zlib1.dll", "libpng16.dll", "jpeg62.dll", "tiff.dll", "pthreadvce3.dll", "sqlite3.dll",
+                   "glew32.dll", "liblzma.dll", "turbojpeg.dll"})
+        m[n] = g_dir;
+    return m;
+}
+static std::string canon_dll(std::string d) {
+    d = lower(d);
+    if (d.rfind("api-ms-win-crt-", 0) == 0) return pe_set().count("ucrtbase.dll") ? "ucrtbase.dll" : d;
+    if (d.find('.') == std::string::npos) d += ".dll";
+    return d;
+}
+static std::vector<std::string> g_init_order;   // dependencies first
+static void* resolve(const std::string& dll, const std::string& sym);
+static PlatformHooks g_hooks;
+
+static bool load_image(const std::string& name) {
+    if (g_loaded.count(name)) return true;
+    auto set = pe_set(); auto it = set.find(name);
+    if (it == set.end()) return false;
+    auto file = read_file(it->second + "\\" + name);
+    if (file.empty()) { fprintf(g_log, "FAIL %s: cannot read %s\n", name.c_str(), it->second.c_str()); return false; }
+    g_loaded[name];   // placeholder: breaks import cycles (find_export on it returns null)
+    LoadedImage img;
+    auto r = load_pe(file, name, g_hooks, resolve, img, true);
+    if (!r.ok) { fprintf(g_log, "FAIL %s\n", r.error.c_str()); g_loaded.erase(name); return false; }
+    for (auto& u : r.unresolved) fprintf(g_log, "UNRESOLVED %s (in %s)\n", u.c_str(), name.c_str());
+    // Unwind tables so C++ exceptions/SEH work inside the mapped image.
+    if (img.pdata_size)
+        RtlAddFunctionTable((PRUNTIME_FUNCTION)(img.base + img.pdata_rva), img.pdata_size / 12, (DWORD64)img.base);
+    fprintf(g_log, "LOADED %s at %p from %s\n", name.c_str(), (void*)img.base, it->second.c_str()); fflush(g_log);
+    g_loaded[name] = std::move(img);
+    g_init_order.push_back(name);
+    return true;
+}
+static void* resolve_in_image(const std::string& name, const std::string& sym, int depth = 0) {
+    auto& img = g_loaded[name];
+    std::string fwd = img.forwarder(sym);
+    if (fwd.empty()) return img.find_export(sym);
+    if (depth > 8) return nullptr;
+    auto dot = fwd.find('.');   // "VCRUNTIME140.memset" or "NTDLL.#12"
+    return resolve(fwd.substr(0, dot) + ".dll", fwd.substr(dot + 1));
+}
+
+static void* resolve(const std::string& dll_in, const std::string& sym) {
+    const std::string& dll = dll_in;
     if (dll == "opengl32.dll" && sym == "glClear") return (void*)shim_glClear;
-    if (auto it = g_loaded.find(dll); it != g_loaded.end()) return it->second.find_export(sym);
+    {
+        std::string c = canon_dll(dll_in);
+        if (g_loaded.count(c) || load_image(c)) {
+            // File-open tracing shims stay in front of the (mapped) CRT.
+            if (c == "ucrtbase.dll") {
+                if (sym == "fopen") return (void*)shim_fopen;
+                if (sym == "fopen_s") return (void*)shim_fopen_s;
+                if (sym == "_wfopen") return (void*)shim_wfopen;
+            }
+            return resolve_in_image(c, sym);
+        }
+    }
     if (dll == "api-ms-win-crt-stdio-l1-1-0.dll") {
         if (sym == "fopen") return (void*)shim_fopen;
         if (sym == "fopen_s") return (void*)shim_fopen_s;
@@ -483,19 +554,10 @@ int main(int argc, char** argv) {
     hooks.alloc_exec = [](size_t n) { return VirtualAlloc(nullptr, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE); };
     hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
 
-    const char* order[] = {"libcocos2d.dll", "libExtensions.dll", "GeometryDash.exe"};
-    for (const char* name : order) {
-        LoadedImage img;
-        auto r = load_pe(read_file(g_dir + "\\" + name), name, hooks, resolve, img, true);
-        if (!r.ok) { fprintf(g_log, "FAIL %s\n", r.error.c_str()); return 1; }
-        for (auto& u : r.unresolved) fprintf(g_log, "UNRESOLVED %s\n", u.c_str());
-        // Register unwind tables so C++ exceptions/SEH work inside the mapped image.
-        if (img.pdata_size)
-            RtlAddFunctionTable((PRUNTIME_FUNCTION)(img.base + img.pdata_rva), img.pdata_size / 12, (DWORD64)img.base);
-
-        fprintf(g_log, "LOADED %s at %p\n", name, (void*)img.base); fflush(g_log);
-        g_loaded[lower(name)] = std::move(img);
-    }
+    g_hooks = hooks;
+    if (!load_image("geometrydash.exe")) return 1;   // pulls in every PE-set dependency recursively
+    for (auto& n : g_init_order) fprintf(g_log, "INIT ORDER %s\n", n.c_str());
+    fflush(g_log);
 
     // Only now, after every pass-through DLL has been loaded by Windows, claim TLS slots.
     setup_static_tls();
@@ -532,11 +594,13 @@ int main(int argc, char** argv) {
 
     using DllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
     using TlsCb = void(NTAPI*)(PVOID, DWORD, PVOID);
-    for (const char* name : {"libcocos2d.dll", "libextensions.dll"}) {
+    for (auto& name : g_init_order) {
+        if (name == "geometrydash.exe") continue;
         auto& img = g_loaded[name];
         for (auto cb : img.tls_callbacks) ((TlsCb)cb)(img.base, DLL_PROCESS_ATTACH, nullptr);
+        if (!img.entry_rva) continue;
         BOOL ok = ((DllMain)(img.base + img.entry_rva))((HINSTANCE)img.base, DLL_PROCESS_ATTACH, nullptr);
-        fprintf(g_log, "DllMain %s -> %d\n", name, ok); fflush(g_log);
+        fprintf(g_log, "DllMain %s -> %d\n", name.c_str(), ok); fflush(g_log);
         if (!ok) return 1;
     }
     auto& exe = g_loaded["geometrydash.exe"];

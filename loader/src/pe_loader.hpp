@@ -33,6 +33,9 @@ struct LoadedImage {
     uint64_t tls_index_va = 0, tls_raw_start = 0, tls_raw_end = 0;
     uint32_t tls_zero_fill = 0;
     uint32_t pdata_rva = 0, pdata_size = 0;               // needed for SEH/C++ exceptions
+    uint32_t export_rva = 0, export_size = 0;             // an export RVA inside this range is a forwarder string
+    // If sym is forwarded ("OTHER.func" / "OTHER.#12"), returns that string, else empty.
+    std::string forwarder(const std::string& sym) const;
     void* find_export(const std::string& sym) const;
 };
 
