@@ -400,7 +400,8 @@ int main() {
     sa.__sa_handler.__sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;   // OpenOrbis' sa_sigaction macro is broken
     sigaction(SIGSEGV, &sa, nullptr); sigaction(SIGBUS, &sa, nullptr); sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGFPE, &sa, nullptr);
-    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
+    // FreeBSD signal numbers (OpenOrbis' signal.h has Linux values: its SIGBUS is 7, FreeBSD's is 10).
+    for (int s : {4 /*ILL*/, 5 /*TRAP*/, 6 /*ABRT*/, 8 /*FPE*/, 10 /*BUS*/, 11 /*SEGV*/, 12 /*SYS*/}) {
         int r = sceKernelInstallExceptionHandler(s, on_kernel_exception);
         logf("exception handler for signal %d -> %#x\n", s, r);
     }
