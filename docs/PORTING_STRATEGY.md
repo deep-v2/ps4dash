@@ -99,7 +99,19 @@ clang++ -std=c++17 -O1 -g -Wall -Wextra -o build/loader_run.exe loader/src/pe_lo
 ./build/loader_run.exe "<path to your GD 2.208 folder>"   # logs: loader_run.log, exceptions.log, glfw_errors.log, files.log, gl.log
 # Optional diagnostics: GDPS4_WATCHDOG_MS=500 GDPS4_WATCH_SECS=10 [GDPS4_FOCUS_AT=5] -> stacks.log
 ```
-| M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **PKG built, waiting for a hardware run.** Compiles and links with clang 23 + OpenOrbis; not yet run on a console. |
+| M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **Done (2026-11-14), all checks PASS on the owner's jailbroken PS4.** RWX flexible memory executes; `sysarch(AMD64_SET_GSBASE)` works and MSVC-style `gs:[0x30]` reads hit our fake TEB; our PE loader maps libcocos2d.dll on PS4 (5875 exports); RobTop's `CCPoint` ctor, `operator+` and `ccpLength` return correct results via the MS x64 ABI. |
+
+### M3 hardware results
+```
+[PASS] exec_memory: alloc=sceKernelMapNamedFlexibleMemory RWX at 0x200368000, call returned 42, signal=0
+[PASS] gs_sysarch: sysarch(AMD64_SET_GSBASE) ret=0 signal=0
+[PASS] gs_teb_read: gs:[0x30]=0x51c430 expected 0x51c430 signal=0
+[PASS] pe_load: base=0x2003bc000 size=0x1c5000 exports=5875 err= signal=0
+[PASS] robtop_code: CCPoint(3,4)=(3,4) +(1.5,-2)=(4.5,2) ccpLength=5 signal=0
+```
+Risk #1 (gs-segment TEB) and #2 (executable memory) from section 4 are resolved: no kernel patch or
+instruction rewriting needed. Still open: the gs base is per thread, so every thread the game creates must
+set it (handled in the CreateThread shim in M4).
 
 ### M3 probe: build, install, run
 Build (Windows, Git Bash, LLVM + OpenOrbis, `OO_PS4_TOOLCHAIN` set):
