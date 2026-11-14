@@ -164,6 +164,9 @@ Console runs (owner's PS4):
 2. All `DllMain`s OK, entered `GeometryDash.exe`, stopped at `xinput1_4!#2` (`XInputGetState`).
    Implemented on `scePad`: the DualShock 4 is XInput controller 0 (Cross=A, Circle=B, Square=X,
    Triangle=Y, L1/R1, L3/R3, D-pad, OPTIONS=Start, touchpad click=Back, sticks, L2/R2 triggers).
+3. Pad opens (`scePadOpen` returns a handle), the game queries its save folder (-> `/data/gdps4/save`)
+   and stops at `user32!SystemParametersInfoW`: GLFW (inside libcocos2d) starting window creation.
+   **M4 complete; M5 (window + OpenGL) starts here.**
 
 PS4 toolchain notes: OpenOrbis' `sa_sigaction` macro is broken (use `__sa_handler.__sa_sigaction`), its
 `mcontext_t` is Linux's layout (FreeBSD `mc_rip` is at ucontext+176), and libc lacks
