@@ -1,0 +1,7 @@
+# Never commit RobTop/third-party game binaries or assets
+*.exe
+*.dll
+*.pdb
+*.pkg
+Resources/
+build/
