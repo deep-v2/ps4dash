@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -153,6 +154,61 @@ MSABI static void* steam_find_iface(void*, const char*) { return steam_dummy(); 
 MSABI static uint64_t steam_user() { return 1; }
 MSABI static void steam_void() {}
 
+// Offline network (until a PS4 network backend exists): libcurl's API with every transfer
+// failing as "couldn't connect", which GD already handles as a failed server request.
+// libwebsockets: context creation fails (NULL), its documented error result.
+enum { CURLE_OK = 0, CURLE_COULDNT_CONNECT = 7 };
+MSABI static int curl_global_init(long) { return CURLE_OK; }
+MSABI static void curl_global_cleanup() {}
+MSABI static void* curl_easy_init() { static int warned; if (!warned++) logf("network: offline (curl requests fail)\n"); return calloc(1, 64); }
+MSABI static int curl_easy_setopt(void*, int, void*) { return CURLE_OK; }
+MSABI static int curl_easy_perform(void*) { return CURLE_COULDNT_CONNECT; }
+MSABI static void curl_easy_reset(void*) {}
+MSABI static void curl_easy_cleanup(void* h) { free(h); }
+MSABI static int curl_easy_getinfo(void*, int info, void* out) {
+    switch (info & 0xF00000) {   // CURLINFO type bits
+    case 0x200000: *(int32_t*)out = 0; break;                     // LONG (32-bit on Windows): e.g. RESPONSE_CODE
+    case 0x300000: *(double*)out = 0; break;                      // DOUBLE
+    case 0x600000: *(int64_t*)out = 0; break;                     // OFF_T
+    default: *(void**)out = nullptr; break;                       // STRING / SLIST / PTR / SOCKET
+    }
+    return CURLE_OK;
+}
+MSABI static void* lws_create_context(const void*) { logf("network: offline (websocket context not created)\n"); return nullptr; }
+MSABI static void* lws_null() { return nullptr; }
+MSABI static int lws_fail() { return -1; }
+MSABI static void lws_void() {}
+static void* net_lookup(const std::string& dll, const std::string& sym) {
+    if (dll == "libcurl.dll") {
+        static const std::map<std::string, void*> m = {
+            {"curl_global_init", (void*)&curl_global_init}, {"curl_global_cleanup", (void*)&curl_global_cleanup},
+            {"curl_easy_init", (void*)&curl_easy_init}, {"curl_easy_setopt", (void*)&curl_easy_setopt},
+            {"curl_easy_perform", (void*)&curl_easy_perform}, {"curl_easy_reset", (void*)&curl_easy_reset},
+            {"curl_easy_cleanup", (void*)&curl_easy_cleanup}, {"curl_easy_getinfo", (void*)&curl_easy_getinfo}};
+        auto it = m.find(sym); return it == m.end() ? nullptr : it->second;
+    }
+    if (dll == "websockets.dll") {
+        if (sym == "lws_create_context") return (void*)&lws_create_context;
+        if (sym == "lws_service" || sym == "lws_write" || sym == "lws_callback_on_writable") return (void*)&lws_fail;
+        if (sym == "lws_context_destroy") return (void*)&lws_void;
+        return (void*)&lws_null;   // lws_get_context, lws_context_user, lws_canonical_hostname, lws_client_connect_via_info, lws_frame_is_binary
+    }
+    return nullptr;
+}
+
+// LoadLibrary/GetModuleHandle of DLLs the Win32 layer implements (kernel32, apisets, ...):
+// a pseudo module whose GetProcAddress answers from the layer, like a real loaded DLL.
+static std::map<std::string, std::unique_ptr<uint8_t[]>> g_pseudo;
+static void* pseudo_module(const std::string& dll) {
+    auto& p = g_pseudo[dll];
+    if (!p) p.reset(new uint8_t[16]());
+    return p.get();
+}
+static const std::string* pseudo_name(const void* base) {
+    for (auto& [n, p] : g_pseudo) if (p.get() == base) return &n;
+    return nullptr;
+}
+
 static bool load_image(const std::string& name);
 static void* resolve(const std::string& dll, const std::string& sym);
 static void* resolve_in_image(const std::string& name, const std::string& sym) {
@@ -171,6 +227,7 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
         return make_stub(dll + "!" + sym);
     }
     if (dll == "shell32.dll" && sym == "SHGetFolderPathA") return (void*)&shim_SHGetFolderPathA;
+    if (void* p = net_lookup(dll, sym)) return p;
     if (dll == "steam_api64.dll") {
         if (sym == "SteamInternal_SteamAPI_Init") return (void*)&steam_init_ok;
         if (sym == "SteamInternal_ContextInit") return (void*)&steam_context_init;
@@ -258,7 +315,9 @@ int main() {
     win32::Hooks wh;
     wh.exe_base = g_loaded["geometrydash.exe"].base;
     wh.module_by_name = [](const std::string& n) -> void* {
-        auto it = g_loaded.find(canon_dll(n)); return it == g_loaded.end() ? nullptr : it->second.base;
+        auto it = g_loaded.find(canon_dll(n));
+        if (it != g_loaded.end()) return it->second.base;
+        return win32::owns_dll(canon_dll(n)) ? pseudo_module(canon_dll(n)) : nullptr;
     };
     wh.load_library = [](const std::string& n) -> void* {
         std::string c = canon_dll(n);
@@ -269,7 +328,9 @@ int main() {
     wh.module_containing = [](const void* a) -> void* { auto* i = image_containing(a); return i ? i->base : nullptr; };
     wh.module_path = [](void* b) -> std::string { auto* i = image_by_base(b); return i ? "C:\\GD\\" + i->name : ""; };
     wh.get_proc = [](void* b, const std::string& s) -> void* {
-        auto* i = image_by_base(b); return i ? resolve_in_image(lower(i->name), s) : nullptr;
+        if (auto* i = image_by_base(b)) return resolve_in_image(lower(i->name), s);
+        if (auto* pn = pseudo_name(b)) return win32::lookup(*pn, s);
+        return nullptr;
     };
     wh.thread_attach = [](void* teb) { build_thread_tls(teb); notify_images(2); };
     wh.thread_detach = [](void*) { notify_images(3); };
