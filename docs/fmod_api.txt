@@ -1,0 +1,66 @@
+FMOD::Channel::getCurrentSound(FMOD::Sound * __ptr64 * __ptr64) __ptr64
+FMOD::Channel::getLoopPoints(unsigned int * __ptr64,unsigned int,unsigned int * __ptr64,unsigned int) __ptr64
+FMOD::Channel::getPosition(unsigned int * __ptr64,unsigned int) __ptr64
+FMOD::Channel::setLoopCount(int) __ptr64
+FMOD::Channel::setLoopPoints(unsigned int,unsigned int,unsigned int,unsigned int) __ptr64
+FMOD::Channel::setPosition(unsigned int,unsigned int) __ptr64
+FMOD::ChannelControl::addDSP(int,FMOD::DSP * __ptr64) __ptr64
+FMOD::ChannelControl::addFadePoint(unsigned __int64,float) __ptr64
+FMOD::ChannelControl::getDSP(int,FMOD::DSP * __ptr64 * __ptr64) __ptr64
+FMOD::ChannelControl::getDSPClock(unsigned __int64 * __ptr64,unsigned __int64 * __ptr64) __ptr64
+FMOD::ChannelControl::getNumDSPs(int * __ptr64) __ptr64
+FMOD::ChannelControl::getPaused(bool * __ptr64) __ptr64
+FMOD::ChannelControl::getPitch(float * __ptr64) __ptr64
+FMOD::ChannelControl::getUserData(void * __ptr64 * __ptr64) __ptr64
+FMOD::ChannelControl::getVolume(float * __ptr64) __ptr64
+FMOD::ChannelControl::removeDSP(FMOD::DSP * __ptr64) __ptr64
+FMOD::ChannelControl::setCallback(FMOD_RESULT (__cdecl*)(struct FMOD_CHANNELCONTROL * __ptr64,FMOD_CHANNELCONTROL_TYPE,FMOD_CHANNELCONTROL_CALLBACK_TYPE,void * __ptr64,void * __ptr64)) __ptr64
+FMOD::ChannelControl::setDelay(unsigned __int64,unsigned __int64,bool) __ptr64
+FMOD::ChannelControl::setPaused(bool) __ptr64
+FMOD::ChannelControl::setPitch(float) __ptr64
+FMOD::ChannelControl::setUserData(void * __ptr64) __ptr64
+FMOD::ChannelControl::setVolume(float) __ptr64
+FMOD::ChannelControl::setVolumeRamp(bool) __ptr64
+FMOD::ChannelControl::stop(void) __ptr64
+FMOD::ChannelGroup::addGroup(FMOD::ChannelGroup * __ptr64,bool,FMOD::DSPConnection * __ptr64 * __ptr64) __ptr64
+FMOD::ChannelGroup::getChannel(int,FMOD::Channel * __ptr64 * __ptr64) __ptr64
+FMOD::ChannelGroup::getNumChannels(int * __ptr64) __ptr64
+FMOD::ChannelGroup::release(void) __ptr64
+FMOD::DSP::getMeteringInfo(struct FMOD_DSP_METERING_INFO * __ptr64,struct FMOD_DSP_METERING_INFO * __ptr64) __ptr64
+FMOD::DSP::release(void) __ptr64
+FMOD::DSP::setMeteringEnabled(bool,bool) __ptr64
+FMOD::DSP::setParameterBool(int,bool) __ptr64
+FMOD::DSP::setParameterFloat(int,float) __ptr64
+FMOD::Sound::getLength(unsigned int * __ptr64,unsigned int) __ptr64
+FMOD::Sound::getOpenState(FMOD_OPENSTATE * __ptr64,unsigned int * __ptr64,bool * __ptr64,bool * __ptr64) __ptr64
+FMOD::Sound::release(void) __ptr64
+FMOD::Sound::setLoopCount(int) __ptr64
+FMOD::System::close(void) __ptr64
+FMOD::System::createChannelGroup(char const * __ptr64,FMOD::ChannelGroup * __ptr64 * __ptr64) __ptr64
+FMOD::System::createDSPByType(FMOD_DSP_TYPE,FMOD::DSP * __ptr64 * __ptr64) __ptr64
+FMOD::System::createSound(char const * __ptr64,unsigned int,struct FMOD_CREATESOUNDEXINFO * __ptr64,FMOD::Sound * __ptr64 * __ptr64) __ptr64
+FMOD::System::createStream(char const * __ptr64,unsigned int,struct FMOD_CREATESOUNDEXINFO * __ptr64,FMOD::Sound * __ptr64 * __ptr64) __ptr64
+FMOD::System::getCPUUsage(struct FMOD_CPU_USAGE * __ptr64) __ptr64
+FMOD::System::getDSPBufferSize(unsigned int * __ptr64,int * __ptr64) __ptr64
+FMOD::System::getSoftwareFormat(int * __ptr64,FMOD_SPEAKERMODE * __ptr64,int * __ptr64) __ptr64
+FMOD::System::getStreamBufferSize(unsigned int * __ptr64,unsigned int * __ptr64) __ptr64
+FMOD::System::getVersion(unsigned int * __ptr64) __ptr64
+FMOD::System::init(int,unsigned int,void * __ptr64) __ptr64
+FMOD::System::lockDSP(void) __ptr64
+FMOD::System::mixerResume(void) __ptr64
+FMOD::System::mixerSuspend(void) __ptr64
+FMOD::System::playSound(FMOD::Sound * __ptr64,FMOD::ChannelGroup * __ptr64,bool,FMOD::Channel * __ptr64 * __ptr64) __ptr64
+FMOD::System::release(void) __ptr64
+FMOD::System::setDSPBufferSize(unsigned int,int) __ptr64
+FMOD::System::setSoftwareFormat(int,FMOD_SPEAKERMODE,int) __ptr64
+FMOD::System::unlockDSP(void) __ptr64
+FMOD::System::update(void) __ptr64
+FMOD_Channel_GetDSPClock  (C API)
+FMOD_Channel_GetDelay  (C API)
+FMOD_Channel_GetFadePoints  (C API)
+FMOD_Channel_RemoveFadePoints  (C API)
+FMOD_Debug_Initialize  (C API)
+FMOD_Memory_GetStats  (C API)
+FMOD_System_Create  (C API)
+FMOD_System_LockDSP  (C API)
+FMOD_System_UnlockDSP  (C API)

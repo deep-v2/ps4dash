@@ -9,6 +9,7 @@
 #include "../../win32/platform.hpp"
 #include "desktop.hpp"
 #include "gl_piglet.hpp"
+#include "fmod_shim.hpp"
 #include <orbis/libkernel.h>
 #include <orbis/Pad.h>
 #include <orbis/UserService.h>
@@ -286,6 +287,7 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
     }
     if (dll == "shell32.dll" && sym == "SHGetFolderPathA") return (void*)&shim_SHGetFolderPathA;
     if (void* p = net_lookup(dll, sym)) return p;
+    if (dll == "fmod.dll") { if (void* p = fmod::lookup(sym)) return p; return make_stub(dll + "!" + sym); }
     if (dll == "xinput1_4.dll" && (sym == "#2" || sym == "XInputGetState")) return (void*)&XInputGetState;
     if (dll == "steam_api64.dll") {
         if (sym == "SteamInternal_SteamAPI_Init") return (void*)&steam_init_ok;
@@ -455,6 +457,12 @@ int main() {
     gl::Hooks gh; gh.log = [](const char* m) { logf("%s", m); }; gh.make_stub = [](const std::string& n) { return make_stub(n); };
     gh.fatal = [](const char* why) { halt(why); };
     gl::init(gh);
+    fmod::Hooks fh; fh.log = [](const char* m) { logf("%s", m); };
+    fh.map_path = [](const std::string& p) {   // FMOD gets the game's paths: absolute (C:\GD\...) or relative to it
+        bool abs = p.size() > 2 && p[1] == ':';
+        return map_path(abs ? p : "C:\\GD\\" + p);
+    };
+    fmod::init(fh);
 
     // 3. Main thread TEB + static TLS.
     void* teb = win32::attach_current_thread();
