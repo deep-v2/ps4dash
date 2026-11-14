@@ -25,7 +25,7 @@ for src in main.cpp desktop.cpp gl_piglet.cpp ../../loader/src/pe_loader.cpp ../
 done
 
 "$LLVM/ld.lld" "$OUT"/obj/*.o -o "$OUT/runner.elf" -m elf_x86_64 -pie --script "$TC/link.x" \
-  --eh-frame-hdr -L"$TC/lib" -lc -lkernel -lc++ -lScePad -lSceUserService -lScePigletv2VSH "$TC/lib/crt1.o"
+  --eh-frame-hdr -L"$TC/lib" -lc -lkernel -lc++ -lScePad -lSceUserService -lScePigletv2VSH -lSceSysmodule -lSceSystemService "$TC/lib/crt1.o"
 
 BIN="$TC/bin/windows"
 export DOTNET_ROLL_FORWARD=Major   # PkgTool.Core targets .NET Core 3.0; run it on any newer runtime

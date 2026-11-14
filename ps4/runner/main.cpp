@@ -380,6 +380,13 @@ int main() {
     g_hooks.alloc_exec = [](size_t n) { return plat::vm_reserve(n, true, 7); };
     g_hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
 
+    // 0. Graphics first: bring up Piglet before any game code runs, like the OpenOrbis sample.
+    {
+        gl::Hooks gh0; gh0.log = [](const char* m) { logf("%s", m); };
+        gl::init(gh0);
+        gl::early_init();
+    }
+
     // 1. Load everything (recursively, dependencies first).
     if (!load_image("geometrydash.exe")) halt("could not load GeometryDash.exe (copy the staged files to /data/gdps4/game)");
     logf("loaded %zu images, %zu import stubs for later milestones\n", g_init_order.size(), g_stub_names.size());

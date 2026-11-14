@@ -11,6 +11,7 @@ struct Hooks {
     void (*fatal)(const char* why) = nullptr;   // stops the run with a message (runner's halt)
 };
 void init(const Hooks& h);
+bool early_init();   // call at process start, before game code (Piglet bring-up + diagnostics)
 void* lookup(const std::string& sym);   // opengl32.dll export (gl*, wgl*), or nullptr
 bool swap_buffers();                    // gdi32!SwapBuffers
 int width();

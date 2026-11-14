@@ -2,6 +2,9 @@
 #include "gl_piglet.hpp"
 #include <orbis/Pigletv2VSH.h>
 #include <orbis/libkernel.h>
+#include <orbis/Sysmodule.h>
+#include <orbis/SystemService.h>
+#include <dirent.h>
 #include <map>
 #include <stdarg.h>
 #include <stdio.h>
@@ -261,6 +264,32 @@ MSABI void* wglGetProcAddress(const char* name) {
 }  // namespace
 
 void init(const Hooks& h) { g_h = h; }
+
+// Diagnostics + Piglet bring-up at process start, before any game code runs (and before this
+// thread's gs base is changed): the same point where the OpenOrbis Piglet sample initializes.
+bool early_init() {
+    OrbisKernelSwVersion v; memset(&v, 0, sizeof v); v.Size = sizeof v;
+    if (sceKernelGetSystemSwVersion(&v) == 0) log("gl: firmware %s (%#x)\n", v.VersionString, v.Version);
+    std::string sandbox = std::string("/") + sceKernelGetFsSandboxRandomWord();
+    for (std::string dir : {sandbox + "/common/lib", std::string("/system/common/lib"), std::string("/system/priv/lib")}) {
+        DIR* d = opendir(dir.c_str());
+        if (!d) { log("gl: cannot list %s\n", dir.c_str()); continue; }
+        std::string hits;
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            for (const char* k : {"Pig", "Shacc", "shacc", "Shader", "Gnm", "Gl"})
+                if (n.find(k) != std::string::npos) { hits += " " + n; break; }
+        }
+        closedir(d);
+        log("gl: %s:%s\n", dir.c_str(), hits.empty() ? " (no GL/shader modules)" : hits.c_str());
+    }
+    sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_SYSTEM_SERVICE);
+    int r = sceSystemServiceHideSplashScreen();
+    log("gl: hide splash -> %#x\n", r);
+    bool ok = init_egl();
+    log("gl: early Piglet init %s\n", ok ? "OK" : "FAILED");
+    return ok;
+}
 void* lookup(const std::string& sym) {
     if (sym == "wglGetProcAddress") return (void*)&wglGetProcAddress;
     return find_gl(sym);
