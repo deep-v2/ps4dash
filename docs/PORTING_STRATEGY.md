@@ -198,8 +198,14 @@ functions, all core GLES2.
   runner. `scePigletSetConfigurationVSH` succeeds.
 - **No runtime GLSL compiler** (`libSceShaccVSH`) on this firmware: the system `common/lib` holds only
   `libScePigletv2VSH`, `libScePrecompiledShaders`, `libSceGnmDriver(ForNeoMode)` and two VSH .NET GL modules.
-- Next: `ps4/piglet_probe` reproduces the OpenOrbis Piglet sample exactly to tell whether Piglet works for
-  homebrew on 13.52 at all. If not, rendering needs another backend (GNM directly, or a software GLES2).
+- `ps4/piglet_probe` (the OpenOrbis Piglet sample's exact bring-up, same linked libraries) **fails the same
+  way on 13.52**: config set and read back correctly, `eglGetDisplay` = NULL. So Piglet's EGL, as the
+  toolchain uses it, is unusable for homebrew on this firmware (OpenOrbis targets 5.05-9.00); no documented
+  workaround found.
+- Options: (a) software GLES2 renderer presenting through `sceVideoOut` (fully ours, testable on PC, speed
+  at 1080p on Jaguar unproven); (b) GNM directly (`libSceGnmDriver` is present; fastest, but needs a GLES2
+  layer on GNM plus a GLSL -> GCN shader compiler without Sony tools); (c) run on a 5.05-9.00/11.00 console
+  where Piglet is known to work (still no runtime shader compiler).
 | M6 | FMOD shim, DS4 input, save data → playable levels | PS4 | Pending |
 | M7 | PKG + install docs | PS4 | Pending |
 | M8 | Geode.dll loading | PS4 | Pending |
