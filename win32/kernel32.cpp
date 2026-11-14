@@ -1560,6 +1560,22 @@ void init(const Hooks& hooks) {
     *(void**)(g_peb.raw + 0x30) = kProcessHeap;        // ProcessHeap
     *(uint32_t*)(g_peb.raw + 0x118) = 10;              // OSMajorVersion
     *(uint16_t*)(g_peb.raw + 0x120) = 19041;           // OSBuildNumber
+    // ProcessParameters (RTL_USER_PROCESS_PARAMETERS): the C runtime's thread start reads it
+    // (PS4 console run: NULL here crashed every _beginthreadex thread at ucrtbase+0x21bd4).
+    static uint8_t params[0x400];
+    memset(params, 0, sizeof params);
+    *(uint32_t*)(params + 0x00) = sizeof params;       // MaximumLength
+    *(uint32_t*)(params + 0x04) = sizeof params;       // Length
+    *(uint32_t*)(params + 0x08) = 1;                   // Flags: PARAMS_NORMALIZED
+    static std::u16string image_path;
+    image_path = u"C:\\GD\\GeometryDash.exe";
+    auto ustr = [](uint8_t* at, const std::u16string& s) {   // UNICODE_STRING {Length, MaximumLength, Buffer}
+        *(uint16_t*)at = (uint16_t)(s.size() * 2); *(uint16_t*)(at + 2) = (uint16_t)(s.size() * 2 + 2);
+        *(const char16_t**)(at + 8) = s.c_str();
+    };
+    ustr(params + 0x60, image_path);                   // ImagePathName
+    ustr(params + 0x70, g_h.command_line);             // CommandLine
+    *(void**)(g_peb.raw + 0x20) = params;
 }
 bool owns_dll(const std::string& dll) {
     return dll == "kernel32.dll" || dll == "kernelbase.dll" || dll == "advapi32.dll" || dll == "shell32.dll" ||
