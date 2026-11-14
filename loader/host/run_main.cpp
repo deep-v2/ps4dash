@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <fstream>
 #include <map>
+#include <set>
+#include <mutex>
 
 using namespace gdps4;
 
@@ -244,9 +246,48 @@ static void* resolve_in_image(const std::string& name, const std::string& sym, i
     return resolve(fwd.substr(0, dot) + ".dll", fwd.substr(dot + 1));
 }
 
+// Log every GL entry point the game looks up at run time (glew -> wglGetProcAddress): the GL
+// surface the PS4 Piglet layer must provide. Only names that resolve on this PC are counted.
+// GDPS4_GLTRACE=1: every returned pointer goes through a thunk that logs the first CALL
+// ("GLCALL name") and jumps on, so we learn which GL functions the game really uses.
+static std::vector<std::string> g_gl_names;
+static std::vector<char> g_gl_called;
+static std::mutex g_gl_mx;
+static void WINAPI gl_called(uint32_t id) {
+    std::lock_guard<std::mutex> l(g_gl_mx);
+    if (!g_gl_called[id]) { g_gl_called[id] = 1; fprintf(g_log, "GLCALL %s\n", g_gl_names[id].c_str()); fflush(g_log); }
+}
+static void* gl_trace_thunk(const std::string& name, void* real) {
+    static uint8_t* mem; static size_t used = 0x10000;
+    if (used + 128 > 0x10000) { mem = (uint8_t*)VirtualAlloc(nullptr, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); used = 0; }
+    uint32_t id; { std::lock_guard<std::mutex> l(g_gl_mx); id = (uint32_t)g_gl_names.size(); g_gl_names.push_back(name); g_gl_called.push_back(0); }
+    uint8_t* p = mem + used; used += 128; uint8_t* q = p;
+    auto put = [&](std::initializer_list<uint8_t> b) { for (auto x : b) *q++ = x; };
+    put({0x51, 0x52, 0x41, 0x50, 0x41, 0x51});                         // push rcx, rdx, r8, r9
+    put({0x48, 0x83, 0xEC, 0x68});                                     // sub rsp,0x68 (keeps 16-byte alignment)
+    put({0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x20, 0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x30,
+         0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x40, 0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x50});   // movdqu [rsp+..],xmm0-3
+    put({0xB9}); memcpy(q, &id, 4); q += 4;                            // mov ecx,id
+    uint64_t fn = (uint64_t)&gl_called; put({0x48, 0xB8}); memcpy(q, &fn, 8); q += 8; put({0xFF, 0xD0});   // call
+    put({0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x20, 0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x30,
+         0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x40, 0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x50});   // movdqu xmm0-3,[rsp+..]
+    put({0x48, 0x83, 0xC4, 0x68, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59}); // add rsp; pop r9, r8, rdx, rcx
+    uint64_t r = (uint64_t)real; put({0x48, 0xB8}); memcpy(q, &r, 8); q += 8; put({0xFF, 0xE0});   // jmp real
+    return p;
+}
+static void* WINAPI shim_wglGetProcAddress(LPCSTR name) {
+    static auto real = (PROC (WINAPI*)(LPCSTR))GetProcAddress(LoadLibraryA("opengl32.dll"), "wglGetProcAddress");
+    PROC p = real(name);
+    static std::set<std::string> seen;
+    if (p && seen.insert(name).second) { fprintf(g_log, "WGLPROC %s\n", name); fflush(g_log); }
+    if (p && getenv("GDPS4_GLTRACE")) return gl_trace_thunk(name, (void*)p);
+    return (void*)p;
+}
+
 static void* resolve(const std::string& dll_in, const std::string& sym) {
     const std::string& dll = dll_in;
     if (dll == "opengl32.dll" && sym == "glClear") return (void*)shim_glClear;
+    if (dll == "opengl32.dll" && sym == "wglGetProcAddress") return (void*)shim_wglGetProcAddress;
     {
         std::string c = canon_dll(dll_in);
         if (g_loaded.count(c) || load_image(c)) {
@@ -301,7 +342,12 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
     if (!h) return nullptr;
     fprintf(g_log, "PASSTHROUGH %s!%s\n", dll.c_str(), sym.c_str());   // = what the PS4 layer must implement
     LPCSTR name = sym[0] == '#' ? MAKEINTRESOURCEA(std::stoul(sym.substr(1))) : sym.c_str();
-    return (void*)GetProcAddress(h, name);
+    void* real = (void*)GetProcAddress(h, name);
+    // GDPS4_GLTRACE also traces first calls of the window/GL imports (user32, gdi32, opengl32).
+    if (real && getenv("GDPS4_GLTRACE") && (dll == "user32.dll" || dll == "gdi32.dll" || dll == "opengl32.dll") &&
+        sym != "glClear" && sym != "wglGetProcAddress")
+        return gl_trace_thunk(dll + "!" + sym, real);
+    return real;
 }
 
 // Static TLS for manually mapped images, via TLS donor DLLs (see tls_donor.cpp).

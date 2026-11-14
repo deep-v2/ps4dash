@@ -7,6 +7,8 @@
 #include "../../loader/src/pe_loader.hpp"
 #include "../../win32/win32.hpp"
 #include "../../win32/platform.hpp"
+#include "desktop.hpp"
+#include "gl_piglet.hpp"
 #include <orbis/libkernel.h>
 #include <orbis/Pad.h>
 #include <orbis/UserService.h>
@@ -255,6 +257,14 @@ static const std::string* pseudo_name(const void* base) {
     return nullptr;
 }
 
+// DLLs implemented natively by this runner (besides the Win32 layer): window system and GL.
+static bool is_native_dll(const std::string& d) { return d == "user32.dll" || d == "gdi32.dll" || d == "opengl32.dll"; }
+static void* native_lookup(const std::string& dll, const std::string& sym) {
+    if (dll == "opengl32.dll") return gl::lookup(sym);
+    if (dll == "user32.dll" || dll == "gdi32.dll") return desktop::lookup(dll, sym);
+    return nullptr;
+}
+
 static bool load_image(const std::string& name);
 static void* resolve(const std::string& dll, const std::string& sym);
 static void* resolve_in_image(const std::string& name, const std::string& sym) {
@@ -281,6 +291,10 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
         if (sym == "SteamInternal_FindOrCreateUserInterface") return (void*)&steam_find_iface;
         if (sym == "SteamAPI_GetHSteamUser") return (void*)&steam_user;
         return (void*)&steam_void;
+    }
+    if (is_native_dll(dll)) {
+        if (void* p = native_lookup(dll, sym)) return p;
+        return make_stub(dll + "!" + sym);
     }
     if (win32::owns_dll(dll)) {
         if (void* p = win32::lookup(dll, sym)) return p;
@@ -364,12 +378,13 @@ int main() {
     wh.module_by_name = [](const std::string& n) -> void* {
         auto it = g_loaded.find(canon_dll(n));
         if (it != g_loaded.end()) return it->second.base;
-        return win32::owns_dll(canon_dll(n)) ? pseudo_module(canon_dll(n)) : nullptr;
+        std::string c = canon_dll(n);
+        return win32::owns_dll(c) || is_native_dll(c) ? pseudo_module(c) : nullptr;
     };
     wh.load_library = [](const std::string& n) -> void* {
         std::string c = canon_dll(n);
         if (in_pe_set(c) && load_image(c)) return g_loaded[c].base;
-        if (win32::owns_dll(c)) return pseudo_module(c);
+        if (win32::owns_dll(c) || is_native_dll(c)) return pseudo_module(c);
         logf("LoadLibrary(%s): not available\n", n.c_str());
         return nullptr;
     };
@@ -377,7 +392,7 @@ int main() {
     wh.module_path = [](void* b) -> std::string { auto* i = image_by_base(b); return i ? "C:\\GD\\" + i->name : ""; };
     wh.get_proc = [](void* b, const std::string& s) -> void* {
         if (auto* i = image_by_base(b)) return resolve_in_image(lower(i->name), s);
-        if (auto* pn = pseudo_name(b)) return win32::lookup(*pn, s);
+        if (auto* pn = pseudo_name(b)) return is_native_dll(*pn) ? native_lookup(*pn, s) : win32::lookup(*pn, s);
         return nullptr;
     };
     wh.thread_attach = [](void* teb) { build_thread_tls(teb); notify_images(2); };
@@ -388,6 +403,10 @@ int main() {
     wh.temp_dir = u"C:\\GD\\save\\temp\\";
     wh.log = [](const char* m) { logf("W32: %s", m); };
     win32::init(wh);
+    desktop::Hooks dh; dh.log = [](const char* m) { logf("%s", m); }; dh.hinstance = wh.exe_base;
+    desktop::init(dh);
+    gl::Hooks gh; gh.log = [](const char* m) { logf("%s", m); }; gh.make_stub = [](const std::string& n) { return make_stub(n); };
+    gl::init(gh);
 
     // 3. Main thread TEB + static TLS.
     void* teb = win32::attach_current_thread();
