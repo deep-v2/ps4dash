@@ -126,9 +126,8 @@ void start_thread(std::function<void()> fn, size_t stack_size) {
         auto* f = (std::function<void()>*)a; (*f)(); delete f; return nullptr;
     }, heap_fn);
     pthread_attr_destroy(&attr);
-    if (rc != 0) { char b[96]; snprintf(b, sizeof b, "gdps4: pthread_create failed (%d)
-", rc); debug_log(b); delete heap_fn; }
-}   // games get 6 (7 on later firmwares) of the 8 Jaguar cores
+    if (rc != 0) { char b[96]; snprintf(b, sizeof b, "gdps4: pthread_create failed (%d)\n", rc); debug_log(b); delete heap_fn; }
+}
 void exit_process(int code) { _exit(code); }
 void debug_log(const char* msg) { printf("%s", msg); }
 
