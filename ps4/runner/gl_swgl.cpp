@@ -122,18 +122,20 @@ void* find(const std::string& n) {
     }
     return nullptr;
 }
+// Desktop-only GL entry points (GL 1.2-2.1 functions GLES2 lacks): glew requires every one to be non-null to
+// report GL 2.0, but the game never calls them (verified on PC). One shared stand-in: if it ever is called,
+// the run stops; the function's name is the last "gl: wglGetProcAddress" lookup of that name in the log.
+MSABI void desktop_gl_called() {
+    if (g_h.fatal) g_h.fatal("the game called a desktop-only GL function (not in OpenGL ES 2.0)");
+    for (;;) sceKernelUsleep(1000000);
+}
 MSABI void* wglGetProcAddress(const char* name) {
-    { static std::set<std::string> seen; if (seen.insert(name).second) log("gl: wglGetProcAddress(%s)\n", name); }
-    if (void* p = find(name)) return p;
-    if (strncmp(name, "gl", 2) == 0 && g_h.make_stub) {
-        // Desktop-only GL entry point: glew needs it non-null; the stub stops the run with its name if called.
-        static std::mutex mx; static std::map<std::string, void*> stubs;
-        std::lock_guard<std::mutex> l(mx);
-        auto& s = stubs[name];
-        if (!s) s = g_h.make_stub(std::string("opengl32.dll!") + name + " (desktop GL)");
-        return s;
-    }
-    return nullptr;
+    static std::set<std::string> seen;
+    bool new_name = seen.insert(name).second;
+    void* p = find(name);
+    if (!p && strncmp(name, "gl", 2) == 0) p = (void*)&desktop_gl_called;
+    if (new_name) log("gl: wglGetProcAddress(%s) -> %s\n", name, !p ? "NULL" : p == (void*)&desktop_gl_called ? "desktop-only stand-in" : "swgl");
+    return p;
 }
 
 // frame timing for the log
