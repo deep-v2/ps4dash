@@ -574,6 +574,13 @@ static DWORD WINAPI watchdog(LPVOID delay_ms) {
             std::string key;
             if (GetThreadContext(mt, &c)) {
                 int depth = 0;
+                {   // innermost frame inside this host exe (swgl): "host+rva" for llvm-symbolizer
+                    static const uint64_t hb = (uint64_t)GetModuleHandleW(nullptr);
+                    MEMORY_BASIC_INFORMATION mi{};
+                    if (VirtualQuery((void*)c.Rip, &mi, sizeof mi) && (uint64_t)mi.AllocationBase == hb) {
+                        char b[48]; sprintf(b, "host+0x%llx < ", (unsigned long long)(c.Rip - hb)); key += b;
+                    }
+                }
                 for (int i = 0; i < 30 && c.Rip && depth < 4; i++) {
                     for (auto& [n, img] : g_loaded)
                         if (c.Rip >= (uint64_t)img.base && c.Rip < (uint64_t)img.base + img.size) {

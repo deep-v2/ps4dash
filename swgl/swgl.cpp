@@ -379,6 +379,9 @@ void vertex(const Program& p, int idx, V& v) {
 }
 
 // ---- rasterization --------------------------------------------------------------------------------
+// Span-based: per triangle, three edge equations and one plane equation per varying; per row, the
+// exact covered x-span is solved from the edges (top-left fill rule), and varyings step linearly.
+// 2D draws (w == 1) with the common shaders/blend modes use an integer fast path (fast_span).
 struct SV { float x, y, z, iw; float a[6]; };   // screen-space vertex, varyings pre-divided by w
 constexpr int kVar = 6;
 void to_screen(const V& v, SV& s) {
@@ -390,6 +393,176 @@ void to_screen(const V& v, SV& s) {
     const float* src = v.var.color;   // color[4] then uv[2] are contiguous in Varyings
     for (int i = 0; i < kVar; i++) s.a[i] = src[i] * iw;
 }
+
+// ---- integer helpers (8-bit channels, packed RGBA with R in the low byte) ----
+inline uint32_t lerp32(uint32_t c0, uint32_t c1, uint32_t a) {   // a in [0,256]
+    uint32_t rb = (((c0 & 0x00FF00FFu) * (256 - a) + (c1 & 0x00FF00FFu) * a) >> 8) & 0x00FF00FFu;
+    uint32_t ag = (((c0 >> 8) & 0x00FF00FFu) * (256 - a) + ((c1 >> 8) & 0x00FF00FFu) * a) & 0xFF00FF00u;
+    return rb | ag;
+}
+inline int wrapi(int i, int n, GLenum mode) {
+    if ((unsigned)i < (unsigned)n) return i;
+    return wrap(i, n, mode);
+}
+// floor() for |x| < 2^22 without a libm call: truncate a positively offset value.
+inline int ifloor(float x) { return (int)(x + 4194304.0f) - 4194304; }
+// Texture coordinates in texels*256 (8 fractional bits, centered for bilinear): integer math from here on.
+inline uint32_t sample_fx(const Texture* t, int fx, int fy) {
+    uint32_t ax = (uint32_t)(fx & 255), ay = (uint32_t)(fy & 255);
+    int x0 = fx >> 8, y0 = fy >> 8;
+    const int w = t->w, h = t->h;
+    const uint32_t* px = t->px.data();
+    if ((unsigned)x0 < (unsigned)(w - 1) && (unsigned)y0 < (unsigned)(h - 1)) {   // all four texels inside: no wrapping
+        const uint32_t* r0 = px + (size_t)y0 * w + x0;
+        const uint32_t* r1 = r0 + w;
+        if ((r0[0] | r0[1] | r1[0] | r1[1]) == 0) return 0;   // transparent black (common in sprite sheets)
+        return lerp32(lerp32(r0[0], r0[1], ax), lerp32(r1[0], r1[1], ax), ay);
+    }
+    int xa = wrapi(x0, w, t->wrap_s), xb = wrapi(x0 + 1, w, t->wrap_s);
+    const uint32_t* r0 = px + (size_t)wrapi(y0, h, t->wrap_t) * w;
+    const uint32_t* r1 = px + (size_t)wrapi(y0 + 1, h, t->wrap_t) * w;
+    return lerp32(lerp32(r0[xa], r0[xb], ax), lerp32(r1[xa], r1[xb], ax), ay);
+}
+inline uint32_t mul8(uint32_t a, uint32_t b) { uint32_t t = a * b + 128; return (t + (t >> 8)) >> 8; }   // a*b/255
+// All four channels times one factor f (0..255), two channels per 32-bit multiply.
+inline uint32_t scale32(uint32_t c, uint32_t f) {
+    f += f >> 7;   // 0..255 -> 0..256 (255 maps to exactly 256)
+    uint32_t rb = (((c & 0x00FF00FFu) * f) >> 8) & 0x00FF00FFu;
+    uint32_t ag = (((c >> 8) & 0x00FF00FFu) * f) & 0xFF00FF00u;
+    return rb | ag;
+}
+inline uint32_t modulate(uint32_t c, const uint32_t m[4]) {   // per-channel multiply by m (0..255)
+    if (m[0] == m[1] && m[1] == m[2] && m[2] == m[3]) return scale32(c, m[0]);   // uniform tint/opacity
+    return mul8(c & 255, m[0]) | (mul8((c >> 8) & 255, m[1]) << 8) | (mul8((c >> 16) & 255, m[2]) << 16) | (mul8(c >> 24, m[3]) << 24);
+}
+// Blend factor in 0..255 for one channel (k) given source/destination pixels.
+inline uint32_t ifactor(GLenum f, uint32_t s, uint32_t d, int k) {
+    switch (f) {
+    case E_ZERO: return 0; case E_ONE: return 255;
+    case E_SRC_ALPHA: return s >> 24; case E_ONE_MINUS_SRC_ALPHA: return 255 - (s >> 24);
+    case E_DST_ALPHA: return d >> 24; case E_ONE_MINUS_DST_ALPHA: return 255 - (d >> 24);
+    case E_SRC_COLOR: return (s >> (8 * k)) & 255; case E_ONE_MINUS_SRC_COLOR: return 255 - ((s >> (8 * k)) & 255);
+    case E_DST_COLOR: return (d >> (8 * k)) & 255; case E_ONE_MINUS_DST_COLOR: return 255 - ((d >> (8 * k)) & 255);
+    }
+    return 255;
+}
+inline bool int_blend_ok(GLenum f) {
+    switch (f) {
+    case E_ZERO: case E_ONE: case E_SRC_ALPHA: case E_ONE_MINUS_SRC_ALPHA: case E_DST_ALPHA: case E_ONE_MINUS_DST_ALPHA:
+    case E_SRC_COLOR: case E_ONE_MINUS_SRC_COLOR: case E_DST_COLOR: case E_ONE_MINUS_DST_COLOR: return true;
+    }
+    return false;
+}
+inline uint32_t blend_i(uint32_t s, uint32_t d) {
+    // Most common in cocos2d: premultiplied (ONE, ONE_MINUS_SRC_ALPHA) and straight alpha.
+    if (g_blend_src_rgb == E_ONE && g_blend_dst_rgb == E_ONE_MINUS_SRC_ALPHA && g_blend_src_a == E_ONE && g_blend_dst_a == E_ONE_MINUS_SRC_ALPHA) {
+        uint32_t ia = 255 - (s >> 24);
+        if (ia == 0) return s;
+        if (ia == 255 && s == 0) return d;
+        // s + d*(1-sa), packed; premultiplied colors keep each channel <= 255 (saturate defensively)
+        uint32_t dd = scale32(d, ia);
+        uint32_t rb = (s & 0x00FF00FFu) + (dd & 0x00FF00FFu), ag = ((s >> 8) & 0x00FF00FFu) + ((dd >> 8) & 0x00FF00FFu);
+        rb |= ((rb >> 8) & 0x00010001u) * 255; ag |= ((ag >> 8) & 0x00010001u) * 255;   // saturate
+        return (rb & 0x00FF00FFu) | ((ag & 0x00FF00FFu) << 8);
+    }
+    if (g_blend_src_rgb == E_SRC_ALPHA && g_blend_dst_rgb == E_ONE_MINUS_SRC_ALPHA &&
+        g_blend_src_a == E_SRC_ALPHA && g_blend_dst_a == E_ONE_MINUS_SRC_ALPHA) {   // straight alpha
+        uint32_t sa = s >> 24;
+        if (sa == 0) return d;
+        if (sa == 255) return s;
+        uint32_t f = sa + (sa >> 7);
+        uint32_t rb = (((s & 0x00FF00FFu) * f + (d & 0x00FF00FFu) * (256 - f)) >> 8) & 0x00FF00FFu;
+        uint32_t ag = (((s >> 8) & 0x00FF00FFu) * f + ((d >> 8) & 0x00FF00FFu) * (256 - f)) & 0xFF00FF00u;
+        // alpha channel: sa*sa + da*(1-sa) per the blend equation
+        uint32_t a = mul8(sa, sa) + mul8(d >> 24, 255 - sa);
+        return ((rb | ag) & 0x00FFFFFFu) | ((a > 255 ? 255 : a) << 24);
+    }
+    if (g_blend_src_rgb == E_SRC_ALPHA && g_blend_dst_rgb == E_ONE && g_blend_src_a == E_SRC_ALPHA && g_blend_dst_a == E_ONE) {   // additive glow
+        uint32_t ss = scale32(s, s >> 24);
+        uint32_t rb = (ss & 0x00FF00FFu) + (d & 0x00FF00FFu), ag = ((ss >> 8) & 0x00FF00FFu) + ((d >> 8) & 0x00FF00FFu);
+        rb |= ((rb >> 8) & 0x00010001u) * 255; ag |= ((ag >> 8) & 0x00010001u) * 255;
+        return (rb & 0x00FF00FFu) | ((ag & 0x00FF00FFu) << 8);
+    }
+    uint32_t r = 0;
+    for (int k = 0; k < 4; k++) {
+        GLenum fs = k == 3 ? g_blend_src_a : g_blend_src_rgb, fd = k == 3 ? g_blend_dst_a : g_blend_dst_rgb;
+        uint32_t sc = (s >> (8 * k)) & 255, dc = (d >> (8 * k)) & 255;
+        uint32_t v = mul8(sc, ifactor(fs, s, d, k)) + mul8(dc, ifactor(fd, s, d, k));
+        r |= (v > 255 ? 255 : v) << (8 * k);
+    }
+    return r;
+}
+
+struct Plane { float dx, dy, c; float at(float x, float y) const { return dx * x + dy * y + c; } };
+
+// Integer fast path: is this draw eligible?
+struct Fast { bool ok = false; FKind kind = FKind::Unknown; const Texture* tex = nullptr; uint32_t ucolor[4] = {255, 255, 255, 255}; };
+Fast fast_path(const Program& p, const Target& t, bool affine) {
+    Fast f;
+    if (!affine || (g_stencil && t.stencil) || (g_depth && t.depth)) return f;
+    if (!(g_color_mask[0] && g_color_mask[1] && g_color_mask[2] && g_color_mask[3])) return f;
+    if (g_blend && (g_blend_eq_rgb != E_FUNC_ADD || g_blend_eq_a != E_FUNC_ADD || !int_blend_ok(g_blend_src_rgb) ||
+                    !int_blend_ok(g_blend_dst_rgb) || !int_blend_ok(g_blend_src_a) || !int_blend_ok(g_blend_dst_a))) return f;
+    switch (p.fs) {
+    case FKind::Color: break;
+    case FKind::Tex: case FKind::TexColor: case FKind::TexUColor: case FKind::TexAlphaOnly: {
+        int unit = p.u_tex0 >= 0 ? p.uniforms[p.u_tex0].iv : 0;
+        f.tex = bound_texture(unit);
+        if (!f.tex || f.tex->w == 0 || f.tex->px.empty()) return f;   // incomplete texture: generic path
+        break;
+    }
+    default: return f;
+    }
+    if (p.fs == FKind::TexUColor && p.u_color >= 0)
+        for (int k = 0; k < 4; k++) f.ucolor[k] = (uint32_t)(std::min(std::max(p.uniforms[p.u_color].v[k], 0.f), 1.f) * 255.f + 0.5f);
+    f.kind = p.fs; f.ok = true;
+    return f;
+}
+inline uint32_t to8(float v) { return v <= 0 ? 0 : v >= 1 ? 255 : (uint32_t)(v * 255.f + 0.5f); }
+
+void fast_span(const Fast& f, const Target& t, int y, int x0, int x1, const Plane* pl, float px0, float py) {
+    uint32_t* row = t.color + (size_t)y * t.w;
+    float c[4], dc[4];
+    for (int k = 0; k < 4; k++) { c[k] = pl[k].at(px0, py); dc[k] = pl[k].dx; }
+    // Texture coordinates stepped in fixed point (texels * 256, bilinear-centered) - no float->int per pixel.
+    bool tex = f.tex != nullptr, bilinear = tex && f.tex->mag_filter != E_NEAREST;
+    float fu = 0, fv = 0, fdu = 0, fdv = 0;
+    if (tex) {
+        float sw = f.tex->w * 256.f, sh = f.tex->h * 256.f;
+        fu = pl[4].at(px0, py) * sw - (bilinear ? 128.f : 0.f); fv = pl[5].at(px0, py) * sh - (bilinear ? 128.f : 0.f);
+        fdu = pl[4].dx * sw; fdv = pl[5].dx * sh;
+    }
+    // Vertex color constant across the span? (sprites: always) -> convert once.
+    bool const_color = dc[0] == 0 && dc[1] == 0 && dc[2] == 0 && dc[3] == 0;
+    uint32_t m[4] = {to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])};
+    bool white = m[0] == 255 && m[1] == 255 && m[2] == 255 && m[3] == 255;
+    const bool blend = g_blend;
+    for (int x = x0; x <= x1; x++) {
+        if (!const_color) { m[0] = to8(c[0]); m[1] = to8(c[1]); m[2] = to8(c[2]); m[3] = to8(c[3]); white = (m[0] & m[1] & m[2] & m[3]) == 255; }
+        uint32_t src;
+        uint32_t texel = 0;
+        if (tex) {
+            if (bilinear) texel = sample_fx(f.tex, ifloor(fu), ifloor(fv));
+            else {
+                int tx = wrapi(ifloor(fu) >> 8, f.tex->w, f.tex->wrap_s), ty = wrapi(ifloor(fv) >> 8, f.tex->h, f.tex->wrap_t);
+                texel = f.tex->px[(size_t)ty * f.tex->w + tx];
+            }
+        }
+        switch (f.kind) {
+        case FKind::Color: src = m[0] | (m[1] << 8) | (m[2] << 16) | (m[3] << 24); break;
+        case FKind::Tex: src = texel; break;
+        case FKind::TexUColor: src = modulate(texel, f.ucolor); break;
+        case FKind::TexAlphaOnly: src = m[0] | (m[1] << 8) | (m[2] << 16) | (mul8(m[3], texel >> 24) << 24); break;
+        default: src = white ? texel : modulate(texel, m); break;   // TexColor
+        }
+        if (!blend) row[x] = src;
+        else if (src != 0 || g_blend_dst_rgb != E_ONE_MINUS_SRC_ALPHA || g_blend_dst_a != E_ONE_MINUS_SRC_ALPHA)
+            row[x] = blend_i(src, row[x]);   // (a fully transparent texel leaves the destination unchanged)
+        if (!const_color) for (int k = 0; k < 4; k++) c[k] += dc[k];
+        fu += fdu; fv += fdv;
+    }
+}
+
 void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const V& v2) {
     if (v0.w <= 0 || v1.w <= 0 || v2.w <= 0) return;   // behind the eye: 2D content never is
     SV s[3]; to_screen(v0, s[0]); to_screen(v1, s[1]); to_screen(v2, s[2]);
@@ -408,29 +581,54 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
         maxx = std::min(maxx, g_scissor_box[0] + g_scissor_box[2] - 1); maxy = std::min(maxy, g_scissor_box[1] + g_scissor_box[3] - 1);
     }
     if (minx > maxx || miny > maxy) return;
-    // Edge functions E_i(x,y) for edge (v_j -> v_k); top-left fill rule via bias.
-    auto edge = [](const SV& a, const SV& b, float x, float y) { return (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x); };
-    auto bias = [](const SV& a, const SV& b) {   // top-left rule (counter-clockwise, y up)
+
+    // Edge i is opposite vertex i: E_i(x,y) = A_i x + B_i y + C_i, >= 0 inside (CCW, y up).
+    float A[3], B[3], C[3]; bool tl[3];
+    for (int i = 0; i < 3; i++) {
+        const SV& a = s[(i + 1) % 3]; const SV& b = s[(i + 2) % 3];
         float dx = b.x - a.x, dy = b.y - a.y;
-        bool top_left = (dy < 0) || (dy == 0 && dx > 0);
-        return top_left ? 0.0f : -1e-7f;
-    };
+        A[i] = -dy; B[i] = dx; C[i] = -dx * a.y + dy * a.x;
+        tl[i] = (dy < 0) || (dy == 0 && dx > 0);   // top-left edges own their pixels
+    }
+    // Plane equations for 1/w, z and the varyings (barycentric = E_i / area).
     float inv_area = 1.0f / area;
-    float b0 = bias(s[1], s[2]), b1 = bias(s[2], s[0]), b2 = bias(s[0], s[1]);
+    auto plane = [&](float f0, float f1, float f2) {
+        return Plane{(A[0] * f0 + A[1] * f1 + A[2] * f2) * inv_area, (B[0] * f0 + B[1] * f1 + B[2] * f2) * inv_area,
+                     (C[0] * f0 + C[1] * f1 + C[2] * f2) * inv_area};
+    };
+    Plane pl[kVar], piw = plane(s[0].iw, s[1].iw, s[2].iw), pz = plane(s[0].z, s[1].z, s[2].z);
+    for (int k = 0; k < kVar; k++) pl[k] = plane(s[0].a[k], s[1].a[k], s[2].a[k]);
+    bool affine = std::fabs(s[0].iw - s[1].iw) < 1e-6f && std::fabs(s[0].iw - s[2].iw) < 1e-6f;
+    if (affine && s[0].iw != 1.0f) for (int k = 0; k < kVar; k++) { pl[k].dx /= s[0].iw; pl[k].dy /= s[0].iw; pl[k].c /= s[0].iw; }
+    Fast fp = fast_path(p, t, affine);
+
     for (int y = miny; y <= maxy; y++) {
         float py = y + 0.5f;
-        for (int x = minx; x <= maxx; x++) {
+        // Solve each edge for the covered x range on this row (pixel centers at x + 0.5).
+        int xs = minx, xe = maxx;
+        for (int i = 0; i < 3 && xs <= xe; i++) {
+            float rowc = B[i] * py + C[i];
+            if (A[i] > 0) {        // E >= 0  <=>  x + 0.5 >= -rowc / A
+                float tx = -rowc / A[i] - 0.5f;
+                int lo = tl[i] ? (int)std::ceil(tx) : (int)std::floor(tx) + 1;
+                xs = std::max(xs, lo);
+            } else if (A[i] < 0) { // E >= 0  <=>  x + 0.5 <= rowc / -A
+                float tx = rowc / -A[i] - 0.5f;
+                int hi = tl[i] ? (int)std::floor(tx) : (int)std::ceil(tx) - 1;
+                xe = std::min(xe, hi);
+            } else if (rowc < 0 || (rowc == 0 && !tl[i])) xs = xe + 1;   // horizontal edge: row fully in or out
+        }
+        if (xs > xe) continue;
+        if (fp.ok) { fast_span(fp, t, y, xs, xe, pl, xs + 0.5f, py); continue; }
+        // Generic path: exact float shading, stencil/depth, any blend mode, perspective-correct.
+        for (int x = xs; x <= xe; x++) {
             float px = x + 0.5f;
-            float w0 = edge(s[1], s[2], px, py), w1 = edge(s[2], s[0], px, py), w2 = edge(s[0], s[1], px, py);
-            if (w0 + b0 < 0 || w1 + b1 < 0 || w2 + b2 < 0) continue;
-            w0 *= inv_area; w1 *= inv_area; w2 *= inv_area;
-            float iw = w0 * s[0].iw + w1 * s[1].iw + w2 * s[2].iw, wcorr = 1.0f / iw;
             Varyings var; float* a = var.color;
-            for (int k = 0; k < kVar; k++) a[k] = (w0 * s[0].a[k] + w1 * s[1].a[k] + w2 * s[2].a[k]) * wcorr;
-            float z = w0 * s[0].z + w1 * s[1].z + w2 * s[2].z;
+            if (affine) for (int k = 0; k < kVar; k++) a[k] = pl[k].at(px, py);
+            else { float wc = 1.0f / piw.at(px, py); for (int k = 0; k < kVar; k++) a[k] = pl[k].at(px, py) * wc; }
             float c[4];
             if (!shade(p, var, c)) continue;
-            output(t, x, y, z, c);
+            output(t, x, y, pz.at(px, py), c);
         }
     }
 }
