@@ -8,6 +8,7 @@
 #include "../src/pe_loader.hpp"
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
@@ -139,9 +140,60 @@ static void* steam_find_iface(...) { return steam_dummy(); }
 static uint64_t steam_user() { return 1; }
 static void steam_void() {}
 
+// File access trace (files.log): which game files are opened, in order, with ms timestamps.
+static HANDLE g_files_h = INVALID_HANDLE_VALUE;
+static void trace_file(const char* what, const char* path, bool ok) {
+    char b[1200]; DWORD w;
+    wsprintfA(b, "%8lu %-6s %s %s\r\n", GetTickCount(), what, ok ? "ok  " : "FAIL", path ? path : "(null)");
+    WriteFile(g_files_h, b, lstrlenA(b), &w, nullptr);
+}
+// Must call ucrtbase's own functions: a FILE* from this exe's CRT is invalid in the game's CRT.
+static FARPROC ucrt(const char* n) { static HMODULE h = LoadLibraryA("ucrtbase.dll"); return GetProcAddress(h, n); }
+static FILE* __cdecl shim_fopen(const char* p, const char* m) {
+    static auto real = (FILE* (__cdecl*)(const char*, const char*))ucrt("fopen");
+    FILE* f = real(p, m); trace_file("fopen", p, f); return f;
+}
+static errno_t __cdecl shim_fopen_s(FILE** o, const char* p, const char* m) {
+    static auto real = (errno_t (__cdecl*)(FILE**, const char*, const char*))ucrt("fopen_s");
+    errno_t e = real(o, p, m); trace_file("fopens", p, e == 0); return e;
+}
+static FILE* __cdecl shim_wfopen(const wchar_t* p, const wchar_t* m) {
+    static auto real = (FILE* (__cdecl*)(const wchar_t*, const wchar_t*))ucrt("_wfopen");
+    FILE* f = real(p, m); trace_file("wfopen", wide_to_utf8(p).c_str(), f); return f;
+}
+static DWORD WINAPI shim_GetFileAttributesA(LPCSTR p) {
+    DWORD a = GetFileAttributesA(p); trace_file("attrib", p, a != INVALID_FILE_ATTRIBUTES); return a;
+}
+
+// GL frame probe: glClear runs once per frame; every 60th call log the current
+// context and pending GL error (main thread, so this is the real render state).
+static HANDLE g_gl_h = INVALID_HANDLE_VALUE;
+static void WINAPI shim_glClear(unsigned mask) {
+    static HMODULE gl = GetModuleHandleA("opengl32.dll");
+    static auto real = (void (WINAPI*)(unsigned))GetProcAddress(gl, "glClear");
+    static auto err = (unsigned (WINAPI*)())GetProcAddress(gl, "glGetError");
+    static auto cur = (void* (WINAPI*)())GetProcAddress(gl, "wglGetCurrentContext");
+    static auto dc = (void* (WINAPI*)())GetProcAddress(gl, "wglGetCurrentDC");
+    static unsigned n = 0;
+    if (n++ % 60 == 0) {
+        char b[200]; DWORD w;
+        wsprintfA(b, "%8lu glClear#%u tid=%lu ctx=%p dc=%p err_before=0x%x\r\n", GetTickCount(), n, GetCurrentThreadId(),
+                  cur(), dc(), err());
+        WriteFile(g_gl_h, b, lstrlenA(b), &w, nullptr);
+    }
+    real(mask);
+}
+
 static void* resolve(const std::string& dll, const std::string& sym) {
+    if (dll == "opengl32.dll" && sym == "glClear") return (void*)shim_glClear;
     if (auto it = g_loaded.find(dll); it != g_loaded.end()) return it->second.find_export(sym);
-    if (dll == "steam_api64.dll") {
+    if (dll == "api-ms-win-crt-stdio-l1-1-0.dll") {
+        if (sym == "fopen") return (void*)shim_fopen;
+        if (sym == "fopen_s") return (void*)shim_fopen_s;
+        if (sym == "_wfopen") return (void*)shim_wfopen;
+    }
+    if (dll == "kernel32.dll" && sym == "GetFileAttributesA") return (void*)shim_GetFileAttributesA;
+    if (dll == "steam_api64.dll" && !getenv("GDPS4_REAL_STEAM")) {   // diagnostic switch: pass through
         fprintf(g_log, "STEAM stub %s\n", sym.c_str());
         if (sym == "SteamInternal_SteamAPI_Init") return (void*)steam_init_ok;
         if (sym == "SteamInternal_ContextInit") return (void*)steam_context_init;
@@ -283,6 +335,126 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// Stall diagnostics: after a delay, suspend every other thread, unwind its stack
+// and log it to stacks.log, then resume. Run once.
+static std::string g_stacks_log;
+static DWORD g_main_tid;
+static DWORD WINAPI watchdog(LPVOID delay_ms) {
+    Sleep((DWORD)(uintptr_t)delay_ms);
+    FILE* f = fopen(g_stacks_log.c_str(), "w");
+    if (!f) return 0;
+    FILE* saved = g_log; g_log = f;   // describe() prints to g_log
+    {   // Director state via exported getters (read-only).
+        auto& cc = g_loaded["libcocos2d.dll"];
+        auto shared = (void* (*)())cc.find_export("?sharedDirector@CCDirector@cocos2d@@SAPEAV12@XZ");
+        auto frames = (unsigned (*)(void*))cc.find_export("?getTotalFrames@CCDirector@cocos2d@@QEAAIXZ");
+        auto paused = (bool (*)(void*))cc.find_export("?isPaused@CCDirector@cocos2d@@QEAA_NXZ");
+        auto dt = (float (*)(void*))cc.find_export("?getDeltaTime@CCDirector@cocos2d@@UEAAMXZ");
+        auto interval = (double (*)(void*))cc.find_export("?getAnimationInterval@CCDirector@cocos2d@@QEAANXZ");
+        auto sched = (void* (*)(void*))cc.find_export("?getScheduler@CCDirector@cocos2d@@UEAAPEAVCCScheduler@2@XZ");
+        auto tscale = (float (*)(void*))cc.find_export("?getTimeScale@CCScheduler@cocos2d@@QEAAMXZ");
+        auto running = (void* (*)(void*))cc.find_export("?getRunningScene@CCDirector@cocos2d@@QEAAPEAVCCScene@2@XZ");
+        auto children = (void* (*)(void*))cc.find_export("?getChildren@CCNode@cocos2d@@UEAAPEAVCCArray@2@XZ");
+        auto count = (unsigned (*)(void*))cc.find_export("?count@CCArray@cocos2d@@QEBAIXZ");
+        auto at = (void* (*)(void*, unsigned))cc.find_export("?objectAtIndex@CCArray@cocos2d@@QEAAPEAVCCObject@2@I@Z");
+        auto& gd = g_loaded["geometrydash.exe"];
+        void* d = shared();
+        int secs = getenv("GDPS4_WATCH_SECS") ? atoi(getenv("GDPS4_WATCH_SECS")) : 3;
+        for (int i = 0; i < secs; i++) {
+            fprintf(f, "DIRECTOR t=%ds frames=%u paused=%d dt=%f", i, frames(d), paused(d), dt(d));
+            // LoadingLayer (child 0 of the running scene): m_loadStep at +0x19c (from loadAssets).
+            void* sc = running(d); void* ch = sc ? children(sc) : nullptr;
+            void* layer = ch && count(ch) ? at(ch, 0) : nullptr;
+            // Identify by vtable: LoadingLayer's primary vtable lives in GeometryDash.exe.
+            uint64_t vt = layer ? *(uint64_t*)layer : 0;
+            bool in_gd = vt >= (uint64_t)gd.base && vt < (uint64_t)gd.base + gd.size;
+            fprintf(f, " layer_vt=%s+0x%llx", in_gd ? "gd" : "?", (unsigned long long)(in_gd ? vt - (uint64_t)gd.base : vt));
+            if (layer && in_gd) fprintf(f, " loadStep=%d", *(int*)((uint8_t*)layer + 0x19c));
+            {   // CCApplication frame limiter (run(): interval = flag@0xc4 ? ticks@0x20 : ticks@0x18).
+                static auto app_get = (uint8_t* (*)())cc.find_export("?sharedApplication@CCApplication@cocos2d@@SAPEAV12@XZ");
+                uint8_t* a = app_get();
+                LARGE_INTEGER now; QueryPerformanceCounter(&now);
+                fprintf(f, " app: ticks18=%lld ticks20=%lld f_bc=%f f_c0=%f flag_c4=%d c7=%d c9=%d now=%lld",
+                        *(long long*)(a + 0x18), *(long long*)(a + 0x20), *(float*)(a + 0xbc), *(float*)(a + 0xc0),
+                        a[0xc4], a[0xc7], a[0xc9], now.QuadPart);
+            }
+            fprintf(f, " fg=%d\n", GetForegroundWindow() == FindWindowA(nullptr, "Geometry Dash")); fflush(f);
+            if (getenv("GDPS4_FOCUS_AT") && i == atoi(getenv("GDPS4_FOCUS_AT"))) {   // test: give the game focus
+                HWND h = FindWindowA(nullptr, "Geometry Dash");
+                // Foreground-lock workaround: a synthetic Alt press lets this process take the foreground.
+                keybd_event(VK_MENU, 0, 0, 0); keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+                BOOL ok = SetForegroundWindow(h);
+                // Then a real click in the middle of the window (user-input activation).
+                RECT r; GetWindowRect(h, &r);
+                SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                fprintf(f, "FOCUS requested hwnd=%p ok=%d + click\n", (void*)h, ok);
+            }
+            Sleep(1000);
+        }
+        (void)interval; (void)tscale; (void)sched;
+    }
+    {   // Sampling profile of the main thread: 200 samples, 25 ms apart.
+        // Each sample records the innermost frames that lie inside game images.
+        HANDLE mt = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, g_main_tid);
+        std::map<std::string, int> hist;
+        for (int s = 0; s < 200 && mt; s++) {
+            SuspendThread(mt);
+            CONTEXT c{}; c.ContextFlags = CONTEXT_FULL;
+            std::string key;
+            if (GetThreadContext(mt, &c)) {
+                int depth = 0;
+                for (int i = 0; i < 30 && c.Rip && depth < 4; i++) {
+                    for (auto& [n, img] : g_loaded)
+                        if (c.Rip >= (uint64_t)img.base && c.Rip < (uint64_t)img.base + img.size) {
+                            DWORD64 ib0; auto r0 = RtlLookupFunctionEntry(c.Rip, &ib0, nullptr);
+                            char b[96]; sprintf(b, "%s+0x%lx < ", n.c_str(), r0 ? r0->BeginAddress : 0);
+                            key += b; depth++;
+                        }
+                    DWORD64 ib; auto rf = RtlLookupFunctionEntry(c.Rip, &ib, nullptr);
+                    if (!rf) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; continue; }
+                    PVOID hd; DWORD64 ef;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, c.Rip, rf, &c, &hd, &ef, nullptr);
+                }
+            }
+            ResumeThread(mt);
+            hist[key]++;
+            Sleep(25);
+        }
+        std::vector<std::pair<int, std::string>> v;
+        for (auto& [k, n] : hist) v.push_back({n, k});
+        std::sort(v.rbegin(), v.rend());
+        fprintf(f, "PROFILE main thread (200 samples, innermost game frames first)\n");
+        for (size_t i = 0; i < v.size() && i < 15; i++) fprintf(f, "  %3d  %s\n", v[i].first, v[i].second.c_str());
+        if (mt) CloseHandle(mt);
+    }
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof te};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        SuspendThread(t);
+        CONTEXT c{}; c.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(t, &c)) {
+            fprintf(f, "THREAD %lu\n", te.th32ThreadID);
+            for (int i = 0; i < 40 && c.Rip; i++) {
+                fprintf(f, "   #%02d ", i); describe(c.Rip);
+                DWORD64 ib; auto rf = RtlLookupFunctionEntry(c.Rip, &ib, nullptr);
+                if (rf) fprintf(f, "  (fn rva 0x%lx)", rf->BeginAddress);
+                fprintf(f, "\n");
+                if (!rf) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; continue; }
+                PVOID hd; DWORD64 ef;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, c.Rip, rf, &c, &hd, &ef, nullptr);
+            }
+        }
+        ResumeThread(t); CloseHandle(t);
+    }
+    CloseHandle(snap);
+    g_log = saved; fclose(f);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <gd_dir>\n", argv[0]); return 2; }
     g_dir = argv[1];
@@ -298,6 +470,14 @@ int main(int argc, char** argv) {
     SetCurrentDirectoryA(g_dir.c_str());               // GD resolves Resources/ relative to cwd
     SetDllDirectoryA(g_dir.c_str());
     AddVectoredExceptionHandler(0, crash_filter);
+    g_stacks_log = std::string(cwd) + "\\stacks.log";
+    g_main_tid = GetCurrentThreadId();
+    g_gl_h = CreateFileA((std::string(cwd) + "\\gl.log").c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                         CREATE_ALWAYS, 0, nullptr);
+    g_files_h = CreateFileA((std::string(cwd) + "\\files.log").c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                            CREATE_ALWAYS, 0, nullptr);
+    if (getenv("GDPS4_WATCHDOG_MS"))   // opt-in diagnostics: director/limiter state, profile, all stacks
+        CreateThread(nullptr, 0, watchdog, (LPVOID)(uintptr_t)atoi(getenv("GDPS4_WATCHDOG_MS")), 0, nullptr);
 
     PlatformHooks hooks;
     hooks.alloc_exec = [](size_t n) { return VirtualAlloc(nullptr, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE); };

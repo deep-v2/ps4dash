@@ -72,7 +72,17 @@ clang++ -std=c++17 -O1 -Wall -Wextra -o build/loader_host.exe loader/src/pe_load
 |---|---|---|---|
 | M0 | Inventory of all imports + classification | PC | **Done** (imports.csv) |
 | M1 | PE loader maps GD.exe/libcocos2d.dll, relocs, exports, imports, reports unresolved | PC (host build) | **Done**: builds with clang 23, `-Wall -Wextra` clean. Maps all 3 images, applies relocs, 1239/1239 RobTop cross-image imports resolve, 898 left for shims. No game code executed yet. |
-| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | **In progress.** Original GeometryDash.exe + libcocos2d.dll + libExtensions.dll run from our loader, open the window, create the GL context and render the real loading screen. Loading then stalls (low CPU, no crash). |
+| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | **Reaches the main menu.** Original GeometryDash.exe + libcocos2d.dll + libExtensions.dll run from our loader: window, GL context, real loading screen, `LoadingLayer` → `MenuLayer` in ~1 s, first-launch Terms notice. Not yet tested: clicking through menus, playing a level, audio output. |
+
+### The "loading stall" was GD's pause-on-focus-loss
+The window sometimes showed the loading frame for 40+ s. Diagnosis (watchdog, `GDPS4_WATCHDOG_MS`):
+- `LoadingLayer` is replaced by `MenuLayer` about 1 s after start; no thread is blocked.
+- `CCDirector::isPaused()` flips to 1 exactly when the window loses the foreground; frames stop and the
+  window keeps its last image. A real click on the window resumes it; losing focus again pauses again.
+- Something on the dev desktop takes focus ~2 s after launch, so the game paused itself. This is the game's own
+  behavior, not a loader bug, and doesn't apply to PS4 (no window focus there).
+- Side finding: shims that return a `FILE*` must call **ucrtbase's** functions. A `FILE*` from the loader's own
+  CRT makes the game's CRT fast-fail (`0xC0000409`).
 
 ### M2 findings (each one carries over to the PS4 runtime)
 - **Module identity:** the game derives its save folder from its exe name and GLFW needs a real `HINSTANCE`. `GetModuleHandle*`/`GetModuleFileName*`/`GetProcAddress`/`LoadLibrary` are shimmed.
@@ -86,7 +96,8 @@ clang++ -std=c++17 -O1 -Wall -Wextra -o build/loader_host.exe loader/src/pe_load
 ```bash
 clang++ -O1 -shared -o build/tls_donor.dll loader/host/tls_donor.cpp
 clang++ -std=c++17 -O1 -g -Wall -Wextra -o build/loader_run.exe loader/src/pe_loader.cpp loader/host/run_main.cpp -luser32
-./build/loader_run.exe "<path to your GD 2.208 folder>"   # logs: loader_run.log, exceptions.log, glfw_errors.log
+./build/loader_run.exe "<path to your GD 2.208 folder>"   # logs: loader_run.log, exceptions.log, glfw_errors.log, files.log, gl.log
+# Optional diagnostics: GDPS4_WATCHDOG_MS=500 GDPS4_WATCH_SECS=10 [GDPS4_FOCUS_AT=5] -> stacks.log
 ```
 | M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **Blocked on clang + hardware test** |
 | M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | Pending |
