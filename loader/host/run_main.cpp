@@ -7,6 +7,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../src/pe_loader.hpp"
 #include "../../win32/win32.hpp"
+#include "swgl_host.hpp"
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -41,7 +42,7 @@ static HMODULE load_real(const std::string& dll) {
 // First real shim: every shell-folder query (incl. CSIDL_LOCAL_APPDATA, where GD keeps
 // CCGameManager.dat / CCLocalLevels.dat) goes to a sandbox, never the user's real saves.
 // On PS4 this same function will return /data/gd.
-static std::string g_sandbox, g_glfw_log, g_raw_log;
+static std::string g_sandbox, g_glfw_log, g_raw_log, g_scratch_dir;
 static HANDLE g_glfw_h = INVALID_HANDLE_VALUE, g_raw_h = INVALID_HANDLE_VALUE;   // opened in main()
 static HRESULT WINAPI shim_SHGetFolderPathA(HWND, int csidl, HANDLE, DWORD, LPSTR out) {
     strcpy_s(out, MAX_PATH, g_sandbox.c_str());
@@ -275,17 +276,44 @@ static void* gl_trace_thunk(const std::string& name, void* real) {
     uint64_t r = (uint64_t)real; put({0x48, 0xB8}); memcpy(q, &r, 8); q += 8; put({0xFF, 0xE0});   // jmp real
     return p;
 }
+// GDPS4_SHADERDUMP=1: write every distinct shader source the game compiles to shaders/<hash>.glsl
+// (the set the software renderer must implement).
+static void (WINAPI* g_real_glShaderSource)(unsigned, int, const char* const*, const int*);
+static void WINAPI dump_glShaderSource(unsigned sh, int n, const char* const* s, const int* len) {
+    std::string src;
+    for (int i = 0; i < n; i++) src += len && len[i] >= 0 ? std::string(s[i], len[i]) : std::string(s[i]);
+    uint64_t h = 1469598103934665603ull; for (unsigned char c : src) h = (h ^ c) * 1099511628211ull;   // FNV-1a
+    char path[MAX_PATH]; snprintf(path, sizeof path, "%s\\shaders\\%016llx.glsl", g_scratch_dir.c_str(), (unsigned long long)h);
+    if (FILE* f = fopen(path, "wb")) { fwrite(src.data(), 1, src.size(), f); fclose(f); }
+    g_real_glShaderSource(sh, n, s, len);
+}
 static void* WINAPI shim_wglGetProcAddress(LPCSTR name) {
     static auto real = (PROC (WINAPI*)(LPCSTR))GetProcAddress(LoadLibraryA("opengl32.dll"), "wglGetProcAddress");
     PROC p = real(name);
+    if (p && getenv("GDPS4_SHADERDUMP") && !strcmp(name, "glShaderSource")) {
+        g_real_glShaderSource = (decltype(g_real_glShaderSource))p;
+        return (void*)&dump_glShaderSource;
+    }
     static std::set<std::string> seen;
     if (p && seen.insert(name).second) { fprintf(g_log, "WGLPROC %s\n", name); fflush(g_log); }
     if (p && getenv("GDPS4_GLTRACE")) return gl_trace_thunk(name, (void*)p);
     return (void*)p;
 }
 
+static void WINAPI swgl_missing() {
+    fprintf(g_log, "SWGL: the game called a desktop-only GL function (last GLCALL line above); stopping\n"); fflush(g_log);
+    ExitProcess(3);
+}
+static void* swgl_missing_stub(const std::string& name) { return gl_trace_thunk(name, (void*)&swgl_missing); }
+static bool use_swgl() { return getenv("GDPS4_SWGL") && getenv("GDPS4_WIN32"); }
+
 static void* resolve(const std::string& dll_in, const std::string& sym) {
     const std::string& dll = dll_in;
+    if (use_swgl() && dll == "opengl32.dll") {   // M5 software renderer on the PC
+        if (void* p = swgl_host::lookup_gl(sym)) return p;
+        return swgl_missing_stub("opengl32.dll!" + sym);
+    }
+    if (use_swgl() && dll == "gdi32.dll" && sym == "SwapBuffers") return swgl_host::swap_buffers_fn();
     if (dll == "opengl32.dll" && sym == "glClear") return (void*)shim_glClear;
     if (dll == "opengl32.dll" && sym == "wglGetProcAddress") return (void*)shim_wglGetProcAddress;
     {
@@ -446,6 +474,7 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS* e) {
     // Real unwind using .pdata (ours are registered with RtlAddFunctionTable).
     fprintf(g_log, "\n  backtrace:\n");
     CONTEXT c = *e->ContextRecord;
+    if (c.Rip == 0) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; }   // call through a NULL pointer: start at the caller
     static uint64_t frames[200000]; int nf = 0;
     for (; nf < 200000 && c.Rip; nf++) {
         frames[nf] = c.Rip;
@@ -510,7 +539,17 @@ static DWORD WINAPI watchdog(LPVOID delay_ms) {
                         a[0xc4], a[0xc7], a[0xc9], now.QuadPart);
             }
             fprintf(f, " fg=%d\n", GetForegroundWindow() == FindWindowA(nullptr, "Geometry Dash")); fflush(f);
-            if (getenv("GDPS4_FOCUS_AT") && i == atoi(getenv("GDPS4_FOCUS_AT"))) {   // test: give the game focus
+            // Benchmarks only: swallow focus-loss messages so GD doesn't pause itself mid-measurement.
+            if (getenv("GDPS4_NOPAUSE")) {
+                static WNDPROC old_proc;
+                struct F { static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+                    if (m == WM_KILLFOCUS || (m == WM_ACTIVATE && LOWORD(w) == WA_INACTIVE) || (m == WM_ACTIVATEAPP && !w)) return 0;
+                    return CallWindowProcW(old_proc, h, m, w, l);
+                } };
+                HWND gw = FindWindowA(nullptr, "Geometry Dash");
+                if (gw && !old_proc) old_proc = (WNDPROC)SetWindowLongPtrW(gw, GWLP_WNDPROC, (LONG_PTR)&F::proc);
+            }
+            if (getenv("GDPS4_FOCUS_AT") && i >= atoi(getenv("GDPS4_FOCUS_AT")) && (i == atoi(getenv("GDPS4_FOCUS_AT")) || GetForegroundWindow() != FindWindowA(nullptr, "Geometry Dash"))) {   // give (and keep) the game focus   // test: give the game focus
                 HWND h = FindWindowA(nullptr, "Geometry Dash");
                 // Foreground-lock workaround: a synthetic Alt press lets this process take the foreground.
                 keybd_event(VK_MENU, 0, 0, 0); keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
@@ -595,6 +634,8 @@ int main(int argc, char** argv) {
     g_sandbox = std::string(cwd) + "\\sandbox_localappdata";
     g_glfw_log = std::string(cwd) + "\\glfw_errors.log";   // absolute: cwd moves to the game folder below
     g_raw_log = std::string(cwd) + "\\exceptions.log";
+    g_scratch_dir = cwd;
+    CreateDirectoryA((std::string(cwd) + "\\shaders").c_str(), nullptr);
     g_glfw_h = CreateFileA(g_glfw_log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
     g_raw_h = CreateFileA(g_raw_log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
     CreateDirectoryA(g_sandbox.c_str(), nullptr);
@@ -615,6 +656,10 @@ int main(int argc, char** argv) {
     hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
 
     g_hooks = hooks;
+    if (use_swgl()) {
+        swgl_host::init([](const char* m) { fprintf(g_log, "%s", m); fflush(g_log); }, swgl_missing_stub);
+        fprintf(g_log, "Renderer: swgl (software)\n");
+    }
     if (getenv("GDPS4_WIN32")) {   // hook the portable Win32 layer up to this loader
         gdps4::win32::Hooks wh;
         wh.exe_base = host_handle();   // real HMODULE: GLFW/user32 need it on the PC host
@@ -640,6 +685,7 @@ int main(int argc, char** argv) {
             char b[MAX_PATH] = ""; GetModuleFileNameA((HMODULE)base, b, MAX_PATH); return b;
         };
         wh.get_proc = [](void* base, const std::string& s) -> void* {
+            if (use_swgl() && (HMODULE)base == GetModuleHandleA("opengl32.dll")) return swgl_host::lookup_gl(s);
             if (auto i = image_by_handle((HMODULE)base)) return resolve_in_image(lower(i->name), s);
             return (void*)GetProcAddress((HMODULE)base, s[0] == '#' ? MAKEINTRESOURCEA(std::stoul(s.substr(1))) : s.c_str());
         };
