@@ -6,7 +6,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -563,7 +567,7 @@ void fast_span(const Fast& f, const Target& t, int y, int x0, int x1, const Plan
     }
 }
 
-void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const V& v2) {
+void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const V& v2, int band_y0, int band_y1) {
     if (v0.w <= 0 || v1.w <= 0 || v2.w <= 0) return;   // behind the eye: 2D content never is
     SV s[3]; to_screen(v0, s[0]); to_screen(v1, s[1]); to_screen(v2, s[2]);
     float area = (s[1].x - s[0].x) * (s[2].y - s[0].y) - (s[2].x - s[0].x) * (s[1].y - s[0].y);
@@ -580,6 +584,7 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
         minx = std::max(minx, g_scissor_box[0]); miny = std::max(miny, g_scissor_box[1]);
         maxx = std::min(maxx, g_scissor_box[0] + g_scissor_box[2] - 1); maxy = std::min(maxy, g_scissor_box[1] + g_scissor_box[3] - 1);
     }
+    miny = std::max(miny, band_y0); maxy = std::min(maxy, band_y1 - 1);   // this worker's rows only
     if (minx > maxx || miny > maxy) return;
 
     // Edge i is opposite vertex i: E_i(x,y) = A_i x + B_i y + C_i, >= 0 inside (CCW, y up).
@@ -632,8 +637,8 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
         }
     }
 }
-// Lines and points (cocos2d debug drawing): rendered as screen-space quads.
-void thick_line(const Program& p, const Target& t, const V& a, const V& b) {
+// Lines and points (cocos2d debug drawing): rendered as screen-space quads (two triangles appended to out).
+void line_quad(const V& a, const V& b, std::vector<V>& out) {
     float hw = std::max(g_line_width, 1.0f) * 0.5f;
     float ax = a.x / a.w, ay = a.y / a.w, bx = b.x / b.w, by = b.y / b.w;
     float dx = (bx - ax) * g_viewport[2], dy = (by - ay) * g_viewport[3], len = std::sqrt(dx * dx + dy * dy);
@@ -642,8 +647,57 @@ void thick_line(const Program& p, const Target& t, const V& a, const V& b) {
     V q[4] = {a, a, b, b};
     q[0].x = (ax + nx) * a.w; q[0].y = (ay + ny) * a.w; q[1].x = (ax - nx) * a.w; q[1].y = (ay - ny) * a.w;
     q[2].x = (bx + nx) * b.w; q[2].y = (by + ny) * b.w; q[3].x = (bx - nx) * b.w; q[3].y = (by - ny) * b.w;
-    triangle(p, t, q[0], q[1], q[2]); triangle(p, t, q[1], q[3], q[2]);
+    out.push_back(q[0]); out.push_back(q[1]); out.push_back(q[2]);
+    out.push_back(q[1]); out.push_back(q[3]); out.push_back(q[2]);
 }
+
+// ---- worker pool: large draws are split into horizontal bands, one per thread ----------------------
+// GL state is only read while a draw runs, and the calling thread waits for all bands before
+// returning, so draw order and state changes stay exactly as issued.
+int g_thread_override = 0;
+struct Pool {
+    std::vector<std::thread> threads;
+    std::mutex m;
+    std::condition_variable cv, done_cv;
+    const std::function<void(int, int)>* job = nullptr;   // (band index, band count)
+    uint64_t generation = 0;
+    int pending = 0, nbands = 1;
+    bool started = false;
+    void start() {
+        unsigned hw = std::thread::hardware_concurrency();
+        int workers = (int)std::min(hw > 1 ? hw - 1 : 0u, 5u);   // + the calling thread = up to 6 bands (PS4 game cores)
+        if (g_thread_override > 0) workers = g_thread_override - 1;
+        if (const char* e = getenv("SWGL_THREADS")) workers = std::max(0, atoi(e) - 1);
+        nbands = workers + 1;
+        for (int i = 0; i < workers; i++)
+            threads.emplace_back([this, i] {
+                uint64_t seen = 0;
+                for (;;) {
+                    const std::function<void(int, int)>* j;
+                    {
+                        std::unique_lock<std::mutex> l(m);
+                        cv.wait(l, [&] { return generation != seen; });
+                        seen = generation; j = job;
+                    }
+                    (*j)(i + 1, nbands);
+                    std::lock_guard<std::mutex> l(m);
+                    if (--pending == 0) done_cv.notify_one();
+                }
+            });
+        started = true;
+        logf("swgl: %d render threads\n", nbands);
+    }
+    void run(const std::function<void(int, int)>& f) {
+        if (!started) start();
+        if (nbands == 1) { f(0, 1); return; }
+        { std::lock_guard<std::mutex> l(m); job = &f; pending = nbands - 1; generation++; }
+        cv.notify_all();
+        f(0, nbands);   // the calling thread takes band 0
+        std::unique_lock<std::mutex> l(m);
+        done_cv.wait(l, [&] { return pending == 0; });
+    }
+};
+Pool g_pool;
 
 void draw(GLenum mode, int count, const std::function<int(int)>& index) {
     Program* p = current_program();
@@ -652,25 +706,52 @@ void draw(GLenum mode, int count, const std::function<int(int)>& index) {
     if (!t.color || count <= 0) return;
     std::vector<V> v((size_t)count);
     for (int i = 0; i < count; i++) vertex(*p, index(i), v[i]);
+    // Assemble triangles (as vertex triples) from the primitive mode.
+    std::vector<V> tri;
+    tri.reserve((size_t)count * 3);
+    auto add = [&](const V& a, const V& b, const V& c) { tri.push_back(a); tri.push_back(b); tri.push_back(c); };
     switch (mode) {
-    case E_TRIANGLES: for (int i = 0; i + 2 < count; i += 3) triangle(*p, t, v[i], v[i + 1], v[i + 2]); break;
+    case E_TRIANGLES: for (int i = 0; i + 2 < count; i += 3) add(v[i], v[i + 1], v[i + 2]); break;
     case E_TRIANGLE_STRIP:
-        for (int i = 0; i + 2 < count; i++) { if (i & 1) triangle(*p, t, v[i + 1], v[i], v[i + 2]); else triangle(*p, t, v[i], v[i + 1], v[i + 2]); }
+        for (int i = 0; i + 2 < count; i++) { if (i & 1) add(v[i + 1], v[i], v[i + 2]); else add(v[i], v[i + 1], v[i + 2]); }
         break;
-    case E_TRIANGLE_FAN: for (int i = 1; i + 1 < count; i++) triangle(*p, t, v[0], v[i], v[i + 1]); break;
-    case E_LINES: for (int i = 0; i + 1 < count; i += 2) thick_line(*p, t, v[i], v[i + 1]); break;
+    case E_TRIANGLE_FAN: for (int i = 1; i + 1 < count; i++) add(v[0], v[i], v[i + 1]); break;
+    case E_LINES: for (int i = 0; i + 1 < count; i += 2) line_quad(v[i], v[i + 1], tri); break;
     case E_LINE_STRIP: case E_LINE_LOOP:
-        for (int i = 0; i + 1 < count; i++) thick_line(*p, t, v[i], v[i + 1]);
-        if (mode == E_LINE_LOOP && count > 2) thick_line(*p, t, v[count - 1], v[0]);
+        for (int i = 0; i + 1 < count; i++) line_quad(v[i], v[i + 1], tri);
+        if (mode == E_LINE_LOOP && count > 2) line_quad(v[count - 1], v[0], tri);
         break;
-    case E_POINTS:
-        for (int i = 0; i < count; i++) thick_line(*p, t, v[i], v[i]);   // degenerate: skipped (points unused by GD)
-        break;
+    case E_POINTS: break;   // unused by GD
     }
+    if (tri.empty()) return;
+    // Screen-space extent and rough pixel count decide whether threading pays off.
+    float miny = 1e30f, maxy = -1e30f, work = 0;
+    for (size_t i = 0; i + 2 < tri.size(); i += 3) {
+        float x[3], y[3];
+        for (int k = 0; k < 3; k++) {
+            const V& q = tri[i + k];
+            float iw = q.w != 0 ? 1.0f / q.w : 0;
+            x[k] = g_viewport[0] + (q.x * iw * 0.5f + 0.5f) * g_viewport[2];
+            y[k] = g_viewport[1] + (q.y * iw * 0.5f + 0.5f) * g_viewport[3];
+        }
+        float y0 = std::min({y[0], y[1], y[2]}), y1 = std::max({y[0], y[1], y[2]});
+        miny = std::min(miny, y0); maxy = std::max(maxy, y1);
+        work += std::fabs((x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0])) * 0.5f;
+    }
+    int ry0 = std::max(0, (int)std::floor(miny)), ry1 = std::min(t.h, (int)std::ceil(maxy) + 1);
+    if (ry0 >= ry1) return;
+    auto raster = [&](int band, int nbands) {
+        int rows = ry1 - ry0;
+        int b0 = ry0 + rows * band / nbands, b1 = ry0 + rows * (band + 1) / nbands;
+        for (size_t i = 0; i + 2 < tri.size(); i += 3) triangle(*p, t, tri[i], tri[i + 1], tri[i + 2], b0, b1);
+    };
+    if (work < 16384 || ry1 - ry0 < 32) raster(0, 1);   // small draw: threads would cost more than they save
+    else g_pool.run(raster);
 }
 }  // namespace
 
 // ================================ public API ======================================================
+void set_render_threads(int n) { g_thread_override = n; }
 void set_default_framebuffer_size(int w, int h) {
     if (w == g_def_w && h == g_def_h) return;
     g_def_w = w; g_def_h = h;

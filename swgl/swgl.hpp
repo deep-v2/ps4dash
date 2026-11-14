@@ -13,6 +13,8 @@ using GLubyte = unsigned char; using GLintptr = intptr_t; using GLsizeiptr = int
 
 // Setup / presentation ---------------------------------------------------------------------------
 void set_log(void (*log)(const char*));
+// Number of render threads including the caller (default: CPU count - 1, max 6). Call before the first draw.
+void set_render_threads(int n);
 void set_default_framebuffer_size(int w, int h);   // window / screen size (allocates the back buffer)
 // Default framebuffer, RGBA8 (R in the lowest byte), bottom-up rows (row 0 = bottom), width*height.
 const uint32_t* default_framebuffer(int* w, int* h);
