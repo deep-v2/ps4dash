@@ -322,6 +322,7 @@ int main() {
     wh.load_library = [](const std::string& n) -> void* {
         std::string c = canon_dll(n);
         if (in_pe_set(c) && load_image(c)) return g_loaded[c].base;
+        if (win32::owns_dll(c)) return pseudo_module(c);
         logf("LoadLibrary(%s): not available\n", n.c_str());
         return nullptr;
     };
