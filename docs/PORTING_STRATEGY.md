@@ -99,7 +99,24 @@ clang++ -std=c++17 -O1 -g -Wall -Wextra -o build/loader_run.exe loader/src/pe_lo
 ./build/loader_run.exe "<path to your GD 2.208 folder>"   # logs: loader_run.log, exceptions.log, glfw_errors.log, files.log, gl.log
 # Optional diagnostics: GDPS4_WATCHDOG_MS=500 GDPS4_WATCH_SECS=10 [GDPS4_FOCUS_AT=5] -> stacks.log
 ```
-| M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **Blocked on clang + hardware test** |
+| M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **PKG built, waiting for a hardware run.** Compiles and links with clang 23 + OpenOrbis; not yet run on a console. |
+
+### M3 probe: build, install, run
+Build (Windows, Git Bash, LLVM + OpenOrbis, `OO_PS4_TOOLCHAIN` set):
+```bash
+bash ps4/m3_probe/build.sh   # -> ps4/m3_probe/build/IV0000-GDPS00003_00-GDPS4M3PROBE0000.pkg
+```
+On the PS4 (GoldHEN or similar homebrew enabler):
+1. Copy `libcocos2d.dll` from your GD 2.208 folder to `/data/gdps4/libcocos2d.dll` (FTP).
+2. Install the PKG (GoldHEN Package Installer / Debug Settings), then start "gdps4 M3 probe".
+3. A notification lists the results; full details are in `/data/gdps4/m3_results.txt`.
+
+What it tests: `exec_memory` (RWX map + run), `gs_sysarch` / `gs_wrgsbase` (setting the gs base),
+`gs_teb_read` (reading `gs:[0x30]` like MSVC code), `pe_load` (our PE loader mapping libcocos2d.dll on
+PS4) and `robtop_code` (calling RobTop's `CCPoint(3,4)`, `operator+` and `ccpLength` via the MS x64 ABI;
+expects (3,4), (4.5,2) and 5).
+Notes: `-std=gnu++17` is required (OpenOrbis libc++ needs BSD extensions), and `PkgTool.Core` needs
+`DOTNET_ROLL_FORWARD=Major` on machines without .NET Core 3.0.
 | M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | Pending |
 | M5 | Piglet GL + fake window → first rendered frame (menu) | PS4 | Pending |
 | M6 | FMOD shim, DS4 input, save data → playable levels | PS4 | Pending |

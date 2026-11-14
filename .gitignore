@@ -7,3 +7,4 @@ Resources/
 build/
 sandbox_localappdata/
 *.log
+ps4/*/build/
