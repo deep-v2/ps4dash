@@ -57,7 +57,13 @@ Geode's loader + mods are Windows DLLs that hook GD by **Windows addresses** —
 ## 6. Toolchain status on this PC
 
 - OpenOrbis PS4Toolchain: **present** at `C:\OpenOrbis\OpenOrbis\PS4Toolchain` (create-fself, create-gp4, PkgTool → PKG packaging covered).
-- LLVM/clang: **missing.** OpenOrbis requires it; nothing can be compiled yet. Also no host C++ compiler (MSYS has only binutils).
+- LLVM/clang 23.1.5: **installed** (`C:\Program Files\LLVM`). Host build works.
+
+### Build & run M1 host test
+```bash
+clang++ -std=c++17 -O1 -Wall -Wextra -o build/loader_host.exe loader/src/pe_loader.cpp loader/host/host_main.cpp
+./build/loader_host.exe "<path to your GD 2.208 folder>"
+```
 - The PATH also references an official Sony ORBIS SDK; this project does not use it — OpenOrbis only.
 
 ## 7. Milestones
@@ -65,7 +71,7 @@ Geode's loader + mods are Windows DLLs that hook GD by **Windows addresses** —
 | # | Milestone | Testable where | Status |
 |---|---|---|---|
 | M0 | Inventory of all imports + classification | PC | **Done** (imports.csv) |
-| M1 | PE loader maps GD.exe/libcocos2d.dll, relocs, exports, imports, reports unresolved | PC (host build) | Code written, **not compiled** |
+| M1 | PE loader maps GD.exe/libcocos2d.dll, relocs, exports, imports, reports unresolved | PC (host build) | **Done**: builds with clang 23, `-Wall -Wextra` clean. Maps all 3 images, applies relocs, 1239/1239 RobTop cross-image imports resolve, 898 left for shims. No game code executed yet. |
 | M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | Pending |
 | M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **Blocked on clang + hardware test** |
 | M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | Pending |
