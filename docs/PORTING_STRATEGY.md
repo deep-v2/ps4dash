@@ -72,7 +72,7 @@ clang++ -std=c++17 -O1 -Wall -Wextra -o build/loader_host.exe loader/src/pe_load
 |---|---|---|---|
 | M0 | Inventory of all imports + classification | PC | **Done** (imports.csv) |
 | M1 | PE loader maps GD.exe/libcocos2d.dll, relocs, exports, imports, reports unresolved | PC (host build) | **Done**: builds with clang 23, `-Wall -Wextra` clean. Maps all 3 images, applies relocs, 1239/1239 RobTop cross-image imports resolve, 898 left for shims. No game code executed yet. |
-| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | **Reaches the main menu.** Original GeometryDash.exe + libcocos2d.dll + libExtensions.dll run from our loader: window, GL context, real loading screen, `LoadingLayer` → `MenuLayer` in ~1 s, first-launch Terms notice. Not yet tested: clicking through menus, playing a level, audio output. |
+| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | **Done (2026-11-14).** Original GeometryDash.exe + libcocos2d.dll + libExtensions.dll run from our loader with pass-through shims. Hand-tested by the project owner: menus, playing levels and sound worked normally. Logs from the session: 0 exceptions, 0 GL errors over ~6,600 frames, all main levels read, save written to the sandbox. |
 
 ### The "loading stall" was GD's pause-on-focus-loss
 The window sometimes showed the loading frame for 40+ s. Diagnosis (watchdog, `GDPS4_WATCHDOG_MS`):
