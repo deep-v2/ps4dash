@@ -6,6 +6,7 @@
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
 #include "../src/pe_loader.hpp"
+#include "../../win32/win32.hpp"
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -282,10 +283,23 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
             {"GetModuleHandleExW", (void*)shim_GetModuleHandleExW}, {"GetModuleHandleExA", (void*)shim_GetModuleHandleExA}};
         if (auto it = k32.find(sym); it != k32.end()) return it->second;
     }
+    // M4: route the kernel layer to our portable Win32 implementation (the code the PS4 runs).
+    // Exception dispatch stays with Windows on the PC host; on PS4 it's still a known gap.
+    if (getenv("GDPS4_WIN32") && gdps4::win32::owns_dll(dll)) {
+        static const char* const host_seh[] = {"RaiseException", "RtlUnwindEx", "RtlUnwind", "RtlVirtualUnwind",
+                                               "RtlLookupFunctionEntry", "RtlPcToFileHeader", "RtlCaptureContext",
+                                               "RtlCaptureStackBackTrace"};
+        bool seh = std::find_if(std::begin(host_seh), std::end(host_seh), [&](const char* s) { return sym == s; }) != std::end(host_seh);
+        if (!seh) {
+            if (void* p = gdps4::win32::lookup(dll, sym)) return p;
+            fprintf(g_log, "W32MISSING %s!%s\n", dll.c_str(), sym.c_str());
+        }
+    }
     static std::map<std::string, HMODULE> mods;
     auto& h = mods[dll];
     if (!h) h = load_real(dll);
     if (!h) return nullptr;
+    fprintf(g_log, "PASSTHROUGH %s!%s\n", dll.c_str(), sym.c_str());   // = what the PS4 layer must implement
     LPCSTR name = sym[0] == '#' ? MAKEINTRESOURCEA(std::stoul(sym.substr(1))) : sym.c_str();
     return (void*)GetProcAddress(h, name);
 }
@@ -555,6 +569,43 @@ int main(int argc, char** argv) {
     hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
 
     g_hooks = hooks;
+    if (getenv("GDPS4_WIN32")) {   // hook the portable Win32 layer up to this loader
+        gdps4::win32::Hooks wh;
+        wh.exe_base = host_handle();   // real HMODULE: GLFW/user32 need it on the PC host
+        wh.module_by_name = [](const std::string& n) -> void* {
+            if (auto i = image_by_name(n)) return i->base;
+            return (void*)GetModuleHandleA(n.c_str());
+        };
+        wh.load_library = [](const std::string& n) -> void* {
+            if (load_image(canon_dll(n))) return g_loaded[canon_dll(n)].base;
+            return (void*)LoadLibraryA(n.c_str());
+        };
+        wh.module_containing = [](const void* a) -> void* {
+            if (image_containing(a)) return host_handle();   // GLFW asks for its own HINSTANCE
+            HMODULE m = nullptr;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m);
+            return (void*)m;
+        };
+        wh.module_path = [](void* base) -> std::string {
+            if (auto i = image_by_handle((HMODULE)base)) {
+                auto set = pe_set(); auto it = set.find(lower(i->name));
+                return (it != set.end() ? it->second : g_dir) + "\\" + i->name;
+            }
+            char b[MAX_PATH] = ""; GetModuleFileNameA((HMODULE)base, b, MAX_PATH); return b;
+        };
+        wh.get_proc = [](void* base, const std::string& s) -> void* {
+            if (auto i = image_by_handle((HMODULE)base)) return resolve_in_image(lower(i->name), s);
+            return (void*)GetProcAddress((HMODULE)base, s[0] == '#' ? MAKEINTRESOURCEA(std::stoul(s.substr(1))) : s.c_str());
+        };
+        wh.map_path = [](const std::string& p) { return p; };   // PC host: Windows paths are host paths
+        wh.command_line = u"\"GeometryDash.exe\"";
+        { std::u16string cd; for (char c : g_dir) cd += (char16_t)(unsigned char)c; wh.current_dir = cd; }
+        { std::u16string td; for (char c : std::string(cwd) + "\\sandbox_temp\\") td += (char16_t)(unsigned char)c; wh.temp_dir = td; }
+        CreateDirectoryA((std::string(cwd) + "\\sandbox_temp").c_str(), nullptr);
+        wh.log = [](const char* m) { fprintf(g_log, "W32LOG %s", m); fflush(g_log); };
+        gdps4::win32::init(wh);
+        fprintf(g_log, "Win32 layer: ON\n");
+    }
     if (!load_image("geometrydash.exe")) return 1;   // pulls in every PE-set dependency recursively
     for (auto& n : g_init_order) fprintf(g_log, "INIT ORDER %s\n", n.c_str());
     fflush(g_log);

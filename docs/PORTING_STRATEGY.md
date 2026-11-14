@@ -129,7 +129,21 @@ PS4) and `robtop_code` (calling RobTop's `CCPoint(3,4)`, `operator+` and `ccpLen
 expects (3,4), (4.5,2) and 5).
 Notes: `-std=gnu++17` is required (OpenOrbis libc++ needs BSD extensions), and `PkgTool.Core` needs
 `DOTNET_ROLL_FORWARD=Major` on machines without .NET Core 3.0.
-| M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | Pending |
+| M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | **In progress.** Done on PC: MS runtimes + media libs PE-loaded (M4a); portable Win32 layer runs the game to the menu (M4b). Remaining: SEH dispatcher for PS4, PS4 runner. |
+
+### M4 approach: Microsoft's own runtimes + a portable Win32 layer
+- **M4a:** `ucrtbase`, `msvcp140`, `vcruntime140(_1)` (from System32) and the game's zlib/libpng/jpeg/tiff/
+  pthreads/sqlite/glew/lzma/turbojpeg are mapped by **our** loader too (recursive loading, apiset mapping,
+  forwarded exports, dependency-first `DllMain`). 15 images, 0 unresolved imports, menu at 60 fps on PC.
+  This replaces ~650 CRT/STL functions with 253 OS functions (`docs/win32_core_todo.txt`).
+- **M4b:** `win32/` is a portable kernel32/advapi32/shell32 (all 253) in C++17 with hand-written Windows types
+  (`WCHAR` = `char16_t`) and MS-ABI exports, over a tiny backend (`platform_posix.cpp` for PS4,
+  `platform_win.cpp` for PC validation). With `GDPS4_WIN32=1` the PC test routes every kernel import there:
+  the game reaches `MenuLayer` at 60 fps; the only kernel calls still going to Windows are the 8
+  exception-dispatch functions (by design on PC).
+- Compiles for PS4 (OpenOrbis) as well; not yet run on the console.
+- Known gaps: SEH/C++ exception dispatch on PS4 (`RaiseException`/`RtlUnwindEx`/`RtlVirtualUnwind` stop
+  with a message), `ExitThread`, process creation, writable file mappings, real time zones (UTC).
 | M5 | Piglet GL + fake window → first rendered frame (menu) | PS4 | Pending |
 | M6 | FMOD shim, DS4 input, save data → playable levels | PS4 | Pending |
 | M7 | PKG + install docs | PS4 | Pending |
