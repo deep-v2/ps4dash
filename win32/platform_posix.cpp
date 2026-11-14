@@ -14,6 +14,26 @@
 #include <time.h>
 #include <unistd.h>
 
+// libc++ needs this for thread_local objects with destructors; OpenOrbis' libc lacks it.
+// Destructors are queued per thread and run by a pthread key destructor at thread exit.
+namespace {
+struct TlDtor { void (*fn)(void*); void* obj; TlDtor* next; };
+pthread_key_t g_tl_key;
+pthread_once_t g_tl_once = PTHREAD_ONCE_INIT;
+void run_tl_dtors(void* head) {
+    for (auto* d = (TlDtor*)head; d;) { auto* n = d->next; d->fn(d->obj); free(d); d = n; }
+}
+void make_tl_key() { pthread_key_create(&g_tl_key, run_tl_dtors); }
+}
+extern "C" int __cxa_thread_atexit_impl(void (*fn)(void*), void* obj, void*) {
+    pthread_once(&g_tl_once, make_tl_key);
+    auto* d = (TlDtor*)malloc(sizeof(TlDtor));
+    if (!d) return -1;
+    d->fn = fn; d->obj = obj; d->next = (TlDtor*)pthread_getspecific(g_tl_key);   // LIFO, like the C++ ABI
+    pthread_setspecific(g_tl_key, d);
+    return 0;
+}
+
 namespace gdps4::plat {
 namespace {
 int orbis_prot(int prot) {

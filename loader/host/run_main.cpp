@@ -264,7 +264,7 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
         if (sym == "fopen_s") return (void*)shim_fopen_s;
         if (sym == "_wfopen") return (void*)shim_wfopen;
     }
-    if (dll == "kernel32.dll" && sym == "GetFileAttributesA") return (void*)shim_GetFileAttributesA;
+    if (dll == "kernel32.dll" && sym == "GetFileAttributesA" && !getenv("GDPS4_WIN32")) return (void*)shim_GetFileAttributesA;
     if (dll == "steam_api64.dll" && !getenv("GDPS4_REAL_STEAM")) {   // diagnostic switch: pass through
         fprintf(g_log, "STEAM stub %s\n", sym.c_str());
         if (sym == "SteamInternal_SteamAPI_Init") return (void*)steam_init_ok;
@@ -274,7 +274,7 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
         return (void*)steam_void;   // RegisterCallback, UnregisterCallback, RunCallbacks, Shutdown
     }
     if (dll == "shell32.dll" && sym == "SHGetFolderPathA") return (void*)shim_SHGetFolderPathA;
-    if (dll == "kernel32.dll") {
+    if (dll == "kernel32.dll" && !getenv("GDPS4_WIN32")) {   // with the Win32 layer on, it answers these
         static const std::map<std::string, void*> k32 = {
             {"GetModuleHandleA", (void*)shim_GetModuleHandleA}, {"GetModuleHandleW", (void*)shim_GetModuleHandleW},
             {"GetModuleFileNameA", (void*)shim_GetModuleFileNameA}, {"GetModuleFileNameW", (void*)shim_GetModuleFileNameW},

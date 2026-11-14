@@ -9,3 +9,4 @@ sandbox_localappdata/
 *.log
 ps4/*/build/
 sandbox_temp/
+stage/

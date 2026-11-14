@@ -142,6 +142,23 @@ Notes: `-std=gnu++17` is required (OpenOrbis libc++ needs BSD extensions), and `
   the game reaches `MenuLayer` at 60 fps; the only kernel calls still going to Windows are the 8
   exception-dispatch functions (by design on PC).
 - Compiles for PS4 (OpenOrbis) as well; not yet run on the console.
+
+### M4c: PS4 runner (`ps4/runner/`)
+Loads the same 15 images on PS4 from `/data/gdps4/game`, links them against the Win32 layer, builds a Win32
+TEB + static-TLS array per thread (gs base), runs TLS callbacks and `DllMain`s in Windows order, then enters
+`GeometryDash.exe`. Path mapping: `C:\GD\...` -> `/data/gdps4/game/...` (case-insensitive lookup),
+`C:\GD\save` (the game's LocalAppData) -> `/data/gdps4/save`. Imports from DLLs not implemented yet
+(user32, gdi32, opengl32, fmod, ws2_32, ...) resolve to stubs that **stop the run and report the function
+name**; the first one reached is the next thing to build. Crashes report image+offset.
+```bash
+bash tools/stage_ps4.sh "<GD 2.208 folder>"   # -> stage/game (19 MB: game binaries + MS runtimes)
+bash ps4/runner/build.sh                      # -> ps4/runner/build/IV0000-GDPS00004_00-GDPS4RUNNER00000.pkg
+```
+On the PS4: upload the contents of `stage/game` to `/data/gdps4/game`, install the PKG, start
+"Geometry Dash (gdps4)". Result: notification + `/data/gdps4/runner.log`.
+PS4 toolchain notes: OpenOrbis' `sa_sigaction` macro is broken (use `__sa_handler.__sa_sigaction`), its
+`mcontext_t` is Linux's layout (FreeBSD `mc_rip` is at ucontext+176), and libc lacks
+`__cxa_thread_atexit_impl` (provided in `platform_posix.cpp`).
 - Known gaps: SEH/C++ exception dispatch on PS4 (`RaiseException`/`RtlUnwindEx`/`RtlVirtualUnwind` stop
   with a message), `ExitThread`, process creation, writable file mappings, real time zones (UTC).
 | M5 | Piglet GL + fake window → first rendered frame (menu) | PS4 | Pending |

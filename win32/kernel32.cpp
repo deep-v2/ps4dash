@@ -1317,6 +1317,24 @@ W32 void* LoadLibraryExW(const WCHAR* n, HANDLE, DWORD) {
     if (!b) set_err(E_MOD_NOT_FOUND);
     return b;
 }
+W32 void* GetModuleHandleA(const char* n) { return n ? GetModuleHandleW(ansi_to_w(n).c_str()) : g_h.exe_base; }
+W32 BOOL GetModuleHandleExA(DWORD flags, const char* n, void** out) {
+    if (flags & 4) return GetModuleHandleExW(flags, (const WCHAR*)n, out);   // FROM_ADDRESS: n is an address
+    return GetModuleHandleExW(flags, n ? ansi_to_w(n).c_str() : nullptr, out);
+}
+W32 DWORD GetModuleFileNameA(void* m, char* buf, DWORD n) {
+    std::string p = g_h.module_path ? g_h.module_path(m ? m : g_h.exe_base) : "";
+    if (p.empty()) { set_err(E_MOD_NOT_FOUND); return 0; }
+    std::u16string w = from_utf8(p.c_str());
+    std::string a = w_to_ansi(w.c_str(), w.size(), 0, nullptr);
+    DWORD len = (DWORD)std::min<size_t>(a.size(), n ? n - 1 : 0);
+    memcpy(buf, a.c_str(), len); if (n) buf[len] = 0;
+    if (a.size() >= n) { set_err(E_INSUFFICIENT_BUFFER); return n; }
+    return len;
+}
+W32 void* LoadLibraryW(const WCHAR* n) { return LoadLibraryExW(n, nullptr, 0); }
+W32 void* LoadLibraryA(const char* n) { return LoadLibraryExW(ansi_to_w(n).c_str(), nullptr, 0); }
+W32 DWORD GetFileAttributesA(const char* n) { return GetFileAttributesW(ansi_to_w(n).c_str()); }
 W32 BOOL FreeLibrary(void*) { return TRUE_; }
 W32 void* FindResourceW(void*, const WCHAR*, const WCHAR*) { set_err(E_RESOURCE_TYPE_NOT_FOUND); return nullptr; }
 W32 void* LoadResource(void*, void*) { return nullptr; }
@@ -1490,6 +1508,8 @@ const Export kExports[] = {
     E(SetThreadExecutionState), E(DisableThreadLibraryCalls), E(VerSetConditionMask), E(FormatMessageW), E(FormatMessageA),
     E(GetModuleHandleW), E(GetModuleHandleExW), E(GetModuleFileNameW), E(GetProcAddress), E(LoadLibraryExW),
     E(FreeLibrary), E(FindResourceW), E(LoadResource),
+    E(GetModuleHandleA), E(GetModuleHandleExA), E(GetModuleFileNameA), E(LoadLibraryW), E(LoadLibraryA),
+    E(GetFileAttributesA),
     E(RegCreateKeyExW), E(RegSetValueExW), E(RegQueryValueExW), E(RegCloseKey),
     E(OpenProcessToken), E(OpenThreadToken), E(GetTokenInformation), E(ConvertSidToStringSidA),
     E(CommandLineToArgvW), E(DragAcceptFiles), E(DragQueryFileW), E(DragQueryPoint), E(DragFinish), E(ShellExecuteA),
