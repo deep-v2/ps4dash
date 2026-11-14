@@ -189,6 +189,17 @@ functions, all core GLES2.
   internal formats -> GLES formats, desktop-only enables ignored, `glClearDepth`/`glDepthRange` doubles.
   Desktop-only GL entry points return stubs that stop with their name if called (glew needs them non-null).
 - Not yet: GDI text rendering (cocos2d TTF labels), mouse/touch input, real keyboard.
+
+#### M5 console results (owner's PS4, firmware 13.52)
+- GLFW initializes on the fake desktop and creates both windows (after implementing ntdll
+  `RtlVerifyVersionInfo`, the user32 DPI functions, shcore and dwmapi, which GLFW calls without NULL checks).
+- **Blocker: Piglet's `eglGetDisplay` returns NULL**, at every Piglet memory size (409-439 MB flexible
+  memory free) and also when initialized at process start before any game code, i.e. not caused by the
+  runner. `scePigletSetConfigurationVSH` succeeds.
+- **No runtime GLSL compiler** (`libSceShaccVSH`) on this firmware: the system `common/lib` holds only
+  `libScePigletv2VSH`, `libScePrecompiledShaders`, `libSceGnmDriver(ForNeoMode)` and two VSH .NET GL modules.
+- Next: `ps4/piglet_probe` reproduces the OpenOrbis Piglet sample exactly to tell whether Piglet works for
+  homebrew on 13.52 at all. If not, rendering needs another backend (GNM directly, or a software GLES2).
 | M6 | FMOD shim, DS4 input, save data → playable levels | PS4 | Pending |
 | M7 | PKG + install docs | PS4 | Pending |
 | M8 | Geode.dll loading | PS4 | Pending |
