@@ -343,7 +343,13 @@ static void notify_images(uint32_t reason) {   // DLL_THREAD_ATTACH(2)/DETACH(3)
 }
 
 // ---- crash reporting ------------------------------------------------------------------------
+static int g_log_fd = -1;
 static void on_fault(int sig, siginfo_t* si, void* ctx) {
+    {   // async-signal-safe first line, in case anything below faults again
+        char b[96]; uint64_t r = *(uint64_t*)((uint8_t*)ctx + 16 + 160);
+        int n = snprintf(b, sizeof b, "FAULT signal %d rip=%#llx addr=%p\n", sig, (unsigned long long)r, si->si_addr);
+        if (g_log_fd >= 0 && n > 0) ::write(g_log_fd, b, (size_t)n);
+    }
     // FreeBSD amd64 ucontext_t: sigset_t (16 bytes), then mcontext_t whose mc_rip is the 21st
     // 8-byte field (offset 160). OpenOrbis' headers describe Linux's layout instead.
     uint64_t rip = *(uint64_t*)((uint8_t*)ctx + 16 + 160);
@@ -358,6 +364,7 @@ static void on_fault(int sig, siginfo_t* si, void* ctx) {
 int main() {
     mkdir(kRoot, 0777); mkdir((std::string(kRoot) + "/save").c_str(), 0777); mkdir((std::string(kRoot) + "/temp").c_str(), 0777);
     g_log = fopen((std::string(kRoot) + "/runner.log").c_str(), "w");
+    if (g_log) { setvbuf(g_log, nullptr, _IONBF, 0); g_log_fd = fileno(g_log); }
     logf("gdps4 runner (M4)\n");
     notify("gdps4: starting Geometry Dash...");
     struct sigaction sa; memset(&sa, 0, sizeof sa);
@@ -392,8 +399,10 @@ int main() {
     wh.module_path = [](void* b) -> std::string { auto* i = image_by_base(b); return i ? "C:\\GD\\" + i->name : ""; };
     wh.get_proc = [](void* b, const std::string& s) -> void* {
         if (auto* i = image_by_base(b)) return resolve_in_image(lower(i->name), s);
-        if (auto* pn = pseudo_name(b)) return is_native_dll(*pn) ? native_lookup(*pn, s) : win32::lookup(*pn, s);
-        return nullptr;
+        void* r = nullptr; std::string mod = "?";
+        if (auto* pn = pseudo_name(b)) { mod = *pn; r = is_native_dll(*pn) ? native_lookup(*pn, s) : win32::lookup(*pn, s); }
+        if (!r) logf("GetProcAddress(%s, %s): not found\n", mod.c_str(), s.c_str());   // caller gets NULL
+        return r;
     };
     wh.thread_attach = [](void* teb) { build_thread_tls(teb); notify_images(2); };
     wh.thread_detach = [](void*) { notify_images(3); };

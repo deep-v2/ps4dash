@@ -1436,6 +1436,29 @@ W32 void* RtlLookupFunctionEntry(uint64_t pc, uint64_t* base, void*) {
 }
 W32 void* RtlPcToFileHeader(void* pc, void** base) { void* b = g_h.module_containing ? g_h.module_containing(pc) : nullptr; *base = b; return b; }
 W32 WORD RtlCaptureStackBackTrace(DWORD, DWORD, void**, DWORD* hash) { if (hash) *hash = 0; return 0; }
+// Version queries (GLFW calls ntdll!RtlVerifyVersionInfo unconditionally). We report Windows 10 (10.0.19041).
+W32 LONG RtlGetVersion(uint8_t* vi) {
+    DWORD size = *(DWORD*)vi;
+    *(DWORD*)(vi + 4) = 10; *(DWORD*)(vi + 8) = 0; *(DWORD*)(vi + 12) = 19041; *(DWORD*)(vi + 16) = 2;   // VER_PLATFORM_WIN32_NT
+    memset(vi + 20, 0, 256);   // szCSDVersion
+    if (size >= 284) { *(WORD*)(vi + 276) = 0; *(WORD*)(vi + 278) = 0; *(WORD*)(vi + 280) = 0x100; vi[282] = 1; }   // workstation
+    return 0;
+}
+W32 LONG RtlVerifyVersionInfo(const uint8_t* vi, DWORD type_mask, ULONGLONG cond_mask) {
+    // Compare major/minor/build against 10.0.19041 using the requested operators (VER_EQUAL..VER_LESS_EQUAL).
+    const DWORD have[3] = {10, 0, 19041}, want[3] = {*(DWORD*)(vi + 4), *(DWORD*)(vi + 8), *(DWORD*)(vi + 12)};
+    const DWORD bits[3] = {0x2 /*MAJOR*/, 0x1 /*MINOR*/, 0x4 /*BUILD*/};
+    const int shift[3] = {3, 0, 6};   // condition bit groups for VER_MAJORVERSION/MINORVERSION/BUILDNUMBER
+    for (int i = 0; i < 3; i++) {
+        if (!(type_mask & bits[i])) continue;
+        BYTE op = (BYTE)((cond_mask >> shift[i]) & 7);
+        bool ok = op == 1 ? have[i] == want[i] : op == 2 ? have[i] > want[i] : op == 3 ? have[i] >= want[i]
+                : op == 4 ? have[i] < want[i] : op == 5 ? have[i] <= want[i] : true;
+        if (!ok) return (LONG)0xC0000059;   // STATUS_REVISION_MISMATCH
+        if (op == 3 && have[i] > want[i]) break;   // greater major already satisfies ">=" for the rest
+    }
+    return 0;
+}
 // RtlCaptureContext: fill the CONTEXT with the caller's registers (offsets per winnt.h CONTEXT, x64).
 __attribute__((naked, ms_abi)) void RtlCaptureContext(void*) {
     __asm__ volatile(
@@ -1515,7 +1538,7 @@ const Export kExports[] = {
     E(CommandLineToArgvW), E(DragAcceptFiles), E(DragQueryFileW), E(DragQueryPoint), E(DragFinish), E(ShellExecuteA),
     E(SHCreateDirectoryExA),
     E(RaiseException), E(RtlUnwindEx), E(RtlUnwind), E(RtlVirtualUnwind), E(RtlLookupFunctionEntry),
-    E(RtlPcToFileHeader), E(RtlCaptureStackBackTrace), E(RtlCaptureContext),
+    E(RtlPcToFileHeader), E(RtlCaptureStackBackTrace), E(RtlCaptureContext), E(RtlGetVersion), E(RtlVerifyVersionInfo),
 };
 #undef E
 const std::unordered_map<std::string, void*>& export_map() {
