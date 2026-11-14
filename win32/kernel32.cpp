@@ -1015,9 +1015,15 @@ W32 BOOL PeekNamedPipe(HANDLE, void*, DWORD, DWORD*, DWORD*, DWORD*) { set_err(E
 W32 BOOL CreateProcessW(const WCHAR*, WCHAR*, void*, void*, BOOL, DWORD, void*, const WCHAR*, void*, void*) { set_err(E_NOT_SUPPORTED); return FALSE_; }
 W32 HANDLE OpenProcess(DWORD, BOOL, DWORD) { set_err(E_ACCESS_DENIED); return nullptr; }
 W32 BOOL GetExitCodeProcess(HANDLE, DWORD* c) { *c = 259; return TRUE_; }
-W32 void ExitProcess(UINT code) { plat::exit_process((int)code); }
+W32 void ExitProcess(UINT code) {
+    log("gdps4: ExitProcess(0x%x) from %p, thread %llu\n", code, __builtin_return_address(0), (unsigned long long)plat::thread_id());
+    plat::exit_process((int)code);
+}
 W32 BOOL TerminateProcess(HANDLE h, UINT code) {
-    if (h == (HANDLE)(intptr_t)-1) plat::exit_process((int)code);
+    if (h == (HANDLE)(intptr_t)-1) {
+        log("gdps4: TerminateProcess(self, 0x%x) from %p, thread %llu\n", code, __builtin_return_address(0), (unsigned long long)plat::thread_id());
+        plat::exit_process((int)code);
+    }
     set_err(E_ACCESS_DENIED); return FALSE_;
 }
 

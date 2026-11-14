@@ -40,7 +40,7 @@ static void logf(const char* fmt, ...) {
     char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
     std::lock_guard<std::mutex> l(g_log_mx);
     printf("[gdps4] %s", b);
-    if (g_log) { fputs(b, g_log); fflush(g_log); }
+    if (g_log) { fprintf(g_log, "[t%u] %s", (unsigned)scePthreadGetthreadid(), b); fflush(g_log); }
 }
 static void notify(const char* msg) {
     OrbisNotificationRequest req; memset(&req, 0, sizeof req);
