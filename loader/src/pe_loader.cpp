@@ -107,6 +107,7 @@ LoadResult load_pe(const std::vector<uint8_t>& f, const std::string& name, const
     if (auto td = dir(DIR_TLS); td.size) {
         auto t = (TlsDir64*)(base + td.rva);   // fields already relocated
         out.tls_index_va = t->index_addr; out.tls_raw_start = t->raw_start; out.tls_raw_end = t->raw_end;
+        out.tls_zero_fill = t->zero_fill;
         for (auto cb = (uint64_t*)t->callbacks; cb && *cb; cb++) out.tls_callbacks.push_back(*cb);
     }
     out.pdata_rva = dir(DIR_EXCEPTION).rva; out.pdata_size = dir(DIR_EXCEPTION).size;

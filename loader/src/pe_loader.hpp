@@ -31,6 +31,7 @@ struct LoadedImage {
     std::unordered_map<uint32_t, uint32_t> ord_exports;   // ordinal -> rva
     std::vector<uint64_t> tls_callbacks;                  // absolute VAs
     uint64_t tls_index_va = 0, tls_raw_start = 0, tls_raw_end = 0;
+    uint32_t tls_zero_fill = 0;
     uint32_t pdata_rva = 0, pdata_size = 0;               // needed for SEH/C++ exceptions
     void* find_export(const std::string& sym) const;
 };

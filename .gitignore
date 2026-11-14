@@ -5,3 +5,5 @@
 *.pkg
 Resources/
 build/
+sandbox_localappdata/
+*.log

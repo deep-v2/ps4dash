@@ -72,7 +72,22 @@ clang++ -std=c++17 -O1 -Wall -Wextra -o build/loader_host.exe loader/src/pe_load
 |---|---|---|---|
 | M0 | Inventory of all imports + classification | PC | **Done** (imports.csv) |
 | M1 | PE loader maps GD.exe/libcocos2d.dll, relocs, exports, imports, reports unresolved | PC (host build) | **Done**: builds with clang 23, `-Wall -Wextra` clean. Maps all 3 images, applies relocs, 1239/1239 RobTop cross-image imports resolve, 898 left for shims. No game code executed yet. |
-| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | Pending |
+| M2 | Host test: run GD on Windows via our loader with pass-through shims (validates loader/TEB/SEH logic) | PC | **In progress.** Original GeometryDash.exe + libcocos2d.dll + libExtensions.dll run from our loader, open the window, create the GL context and render the real loading screen. Loading then stalls (low CPU, no crash). |
+
+### M2 findings (each one carries over to the PS4 runtime)
+- **Module identity:** the game derives its save folder from its exe name and GLFW needs a real `HINSTANCE`. `GetModuleHandle*`/`GetModuleFileName*`/`GetProcAddress`/`LoadLibrary` are shimmed.
+- **Save data:** `SHGetFolderPathA` is shimmed to a sandbox (`sandbox_localappdata/`), so the user's real saves are never touched. On PS4 this becomes `/data/gd`.
+- **Steam:** the game exits unless `SteamAPI_Init` succeeds, then calls virtual methods on Steam interfaces. Offline Steam stub: Init = OK, every interface is a dummy whose methods return 0.
+- **Static TLS:** swapping ntdll's per-thread TLS arrays corrupts the heap (on thread exit and on TLS growth). Solved on the Windows host with *TLS donor DLLs*: one tiny DLL per mapped image gets a real slot from ntdll, and its template is overwritten with the image's template. On PS4 we own the TEB entirely, so this is host-only.
+- **MSVC thread-safe statics** depend on the TLS epoch value (`INT_MIN` in the template). A wrong TLS block shows up as constructors silently skipped and null objects.
+- **Vanilla redirects:** Geode's `XInput1_4.dll` proxy and the request viewer's `libcurl.dll` proxy are bypassed (System32 XInput, `libcurl_orig.dll`).
+
+### Build & run M2
+```bash
+clang++ -O1 -shared -o build/tls_donor.dll loader/host/tls_donor.cpp
+clang++ -std=c++17 -O1 -g -Wall -Wextra -o build/loader_run.exe loader/src/pe_loader.cpp loader/host/run_main.cpp -luser32
+./build/loader_run.exe "<path to your GD 2.208 folder>"   # logs: loader_run.log, exceptions.log, glfw_errors.log
+```
 | M3 | PS4 hello: eboot that maps an image RWX, sets gs base, calls into PE code | PS4 | **Blocked on clang + hardware test** |
 | M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | Pending |
 | M5 | Piglet GL + fake window → first rendered frame (menu) | PS4 | Pending |
