@@ -134,12 +134,11 @@ MSABI void* wglGetProcAddress(const char* name) {
     bool new_name = seen.insert(name).second;
     void* p = find(name);
     if (!p && strncmp(name, "gl", 2) == 0) p = (void*)&desktop_gl_called;
-    if (new_name) {
-        static int desktop_only = 0;
-        if (p == (void*)&desktop_gl_called) {   // ~1000 of these during glewInit: count, don't list
-            if (++desktop_only % 200 == 1) log("gl: desktop-only GL lookups so far: %d (latest %s)\n", desktop_only, name);
-        } else log("gl: wglGetProcAddress(%s) -> %s\n", name, p ? "swgl" : "NULL");
-    }
+    static int seq = 0;
+    ++seq;
+    if (new_name)   // every lookup, numbered, logged before returning (crash hunt in glewInit)
+        log("gl: #%d wglGetProcAddress(%s) -> %s\n", seq, name,
+            !p ? "NULL" : p == (void*)&desktop_gl_called ? "desktop-only stand-in" : "swgl");
     return p;
 }
 
