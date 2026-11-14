@@ -346,6 +346,27 @@ static void notify_images(uint32_t reason) {   // DLL_THREAD_ATTACH(2)/DETACH(3)
 
 // ---- crash reporting ------------------------------------------------------------------------
 static int g_log_fd = -1;
+// PS4 kernel exception hook (libkernel exports it; OpenOrbis headers don't declare it). POSIX signal
+// handlers never ran on FW 13.52 - the process was killed (CE-34878-0) - so faults are caught here.
+extern "C" int sceKernelInstallExceptionHandler(int signum, void (*handler)(int, void*));
+static void on_kernel_exception(int sig, void* ctx) {
+    // The context layout differs from stock FreeBSD; dump it raw and resolve RIP/RSP from the words.
+    char b[256];
+    int n = snprintf(b, sizeof b, "EXCEPTION signal %d, context words:\n", sig);
+    if (g_log_fd >= 0 && n > 0) ::write(g_log_fd, b, (size_t)n);
+    const uint64_t* w = (const uint64_t*)ctx;
+    for (int i = 0; i < 64; i++) {
+        uint64_t v = w[i];
+        const char* where = "";
+        char img[96] = "";
+        if (auto* im = image_containing((void*)v)) { snprintf(img, sizeof img, "  = %s+%#llx", im->name.c_str(), (unsigned long long)(v - (uint64_t)im->base)); where = img; }
+        n = snprintf(b, sizeof b, "  [%02d +%#05x] %#018llx%s\n", i, i * 8, (unsigned long long)v, where);
+        if (g_log_fd >= 0 && n > 0) ::write(g_log_fd, b, (size_t)n);
+    }
+    notify("gdps4: crashed (exception logged to runner.log)");
+    for (;;) sceKernelUsleep(1000000);
+}
+
 static void on_fault(int sig, siginfo_t* si, void* ctx) {
     {   // async-signal-safe first line, in case anything below faults again
         char b[96]; uint64_t r = *(uint64_t*)((uint8_t*)ctx + 16 + 160);
@@ -376,6 +397,10 @@ int main() {
     sa.__sa_handler.__sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;   // OpenOrbis' sa_sigaction macro is broken
     sigaction(SIGSEGV, &sa, nullptr); sigaction(SIGBUS, &sa, nullptr); sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGFPE, &sa, nullptr);
+    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
+        int r = sceKernelInstallExceptionHandler(s, on_kernel_exception);
+        logf("exception handler for signal %d -> %#x\n", s, r);
+    }
 
     g_hooks.alloc_exec = [](size_t n) { return plat::vm_reserve(n, true, 7); };
     g_hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
