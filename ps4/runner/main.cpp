@@ -258,10 +258,12 @@ static const std::string* pseudo_name(const void* base) {
 }
 
 // DLLs implemented natively by this runner (besides the Win32 layer): window system and GL.
-static bool is_native_dll(const std::string& d) { return d == "user32.dll" || d == "gdi32.dll" || d == "opengl32.dll"; }
+static bool is_native_dll(const std::string& d) {
+    return d == "user32.dll" || d == "gdi32.dll" || d == "opengl32.dll" || d == "shcore.dll" || d == "dwmapi.dll";
+}
 static void* native_lookup(const std::string& dll, const std::string& sym) {
     if (dll == "opengl32.dll") return gl::lookup(sym);
-    if (dll == "user32.dll" || dll == "gdi32.dll") return desktop::lookup(dll, sym);
+    return desktop::lookup(dll, sym);   // user32, gdi32, shcore, dwmapi
     return nullptr;
 }
 

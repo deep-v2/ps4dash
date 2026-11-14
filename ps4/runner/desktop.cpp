@@ -307,6 +307,25 @@ MSABI BOOL EnumDisplaySettingsW(const WCHAR*, DWORD mode, uint8_t* dm) {
 }
 MSABI LONG ChangeDisplaySettingsExW(const WCHAR*, void*, HWND, DWORD, void*) { return 0; }
 
+// ---- DPI (user32/shcore) and DWM: GLFW calls these through GetProcAddress without NULL checks
+// once the OS reports Windows 10. One display at 96 DPI (no scaling); DWM composition off. ----
+MSABI BOOL SetProcessDPIAware() { return 1; }
+MSABI BOOL SetProcessDpiAwarenessContext(void*) { return 1; }
+MSABI BOOL ChangeWindowMessageFilterEx(HWND, UINT, DWORD, void*) { return 1; }
+MSABI BOOL EnableNonClientDpiScaling(HWND) { return 1; }
+MSABI UINT GetDpiForWindow(HWND) { return 96; }
+MSABI BOOL AdjustWindowRectExForDpi(RECT*, DWORD, BOOL, DWORD, UINT) { return 1; }
+MSABI int GetSystemMetricsForDpi(int idx, UINT) {
+    switch (idx) { case 0: return W(); case 1: return H(); case 4: return 0; case 32: case 33: return 0; }   // CXSCREEN, CYSCREEN, CYCAPTION, CXFRAME, CYFRAME
+    return 0;
+}
+MSABI int32_t GetDpiForMonitor(void*, int, UINT* x, UINT* y) { if (x) *x = 96; if (y) *y = 96; return 0; }
+MSABI int32_t SetProcessDpiAwareness(int) { return 0; }
+MSABI int32_t DwmIsCompositionEnabled(BOOL* enabled) { *enabled = 0; return 0; }
+MSABI int32_t DwmFlush() { return 0; }
+MSABI int32_t DwmEnableBlurBehindWindow(HWND, const void*) { return 0; }
+MSABI int32_t DwmGetColorizationColor(DWORD* c, BOOL* opaque) { if (c) *c = 0; if (opaque) *opaque = 1; return 0; }
+
 // ---- user32: clipboard / dialogs ----------------------------------------------------------------
 MSABI BOOL OpenClipboard(HWND) { return 1; }
 MSABI BOOL CloseClipboard() { return 1; }
@@ -383,7 +402,9 @@ const std::map<std::string, void*>& user32() {
         E(GetMonitorInfoW), E(EnumDisplayMonitors), E(EnumDisplayDevicesW), E(EnumDisplaySettingsW), E(ChangeDisplaySettingsExW),
         E(OpenClipboard), E(CloseClipboard), E(EmptyClipboard), E(GetClipboardData), E(SetClipboardData), E(MessageBoxW),
         E(MessageBoxA), E(DialogBoxIndirectParamW), E(EndDialog), E(GetDlgItem), E(SetDlgItemTextA), E(SetDlgItemTextW),
-        E(SetRect), E(OffsetRect), E(PtInRect), E(GetDC), E(ReleaseDC)};
+        E(SetRect), E(OffsetRect), E(PtInRect), E(GetDC), E(ReleaseDC),
+        E(SetProcessDPIAware), E(SetProcessDpiAwarenessContext), E(ChangeWindowMessageFilterEx),
+        E(EnableNonClientDpiScaling), E(GetDpiForWindow), E(AdjustWindowRectExForDpi), E(GetSystemMetricsForDpi)};
     return m;
 }
 const std::map<std::string, void*>& gdi32() {
@@ -392,13 +413,24 @@ const std::map<std::string, void*>& gdi32() {
         E(SwapBuffers), E(SetDeviceGammaRamp), E(GetStockObject), E(CreateRectRgn), E(DeleteObject)};
     return m;
 }
+const std::map<std::string, void*>& shcore() {
+    static const std::map<std::string, void*> m = {E(GetDpiForMonitor), E(SetProcessDpiAwareness)};
+    return m;
+}
+const std::map<std::string, void*>& dwmapi() {
+    static const std::map<std::string, void*> m = {E(DwmIsCompositionEnabled), E(DwmFlush), E(DwmEnableBlurBehindWindow),
+                                                   E(DwmGetColorizationColor)};
+    return m;
+}
 #undef E
 }  // namespace
 
 void init(const Hooks& h) { g_h = h; }
 void* lookup(const std::string& dll, const std::string& sym) {
-    const auto& m = dll == "user32.dll" ? user32() : dll == "gdi32.dll" ? gdi32() : user32();
-    if (dll != "user32.dll" && dll != "gdi32.dll") return nullptr;
+    const std::map<std::string, void*>* t = dll == "user32.dll" ? &user32() : dll == "gdi32.dll" ? &gdi32()
+                                          : dll == "shcore.dll" ? &shcore() : dll == "dwmapi.dll" ? &dwmapi() : nullptr;
+    if (!t) return nullptr;
+    const auto& m = *t;
     auto it = m.find(sym);
     return it == m.end() ? nullptr : it->second;
 }
