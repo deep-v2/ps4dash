@@ -367,7 +367,10 @@ int main() {
     mkdir(kRoot, 0777); mkdir((std::string(kRoot) + "/save").c_str(), 0777); mkdir((std::string(kRoot) + "/temp").c_str(), 0777);
     g_log = fopen((std::string(kRoot) + "/runner.log").c_str(), "w");
     if (g_log) { setvbuf(g_log, nullptr, _IONBF, 0); g_log_fd = fileno(g_log); }
-    logf("gdps4 runner (M4)\n");
+#ifndef GDPS4_BUILD
+#define GDPS4_BUILD "dev"
+#endif
+    logf("gdps4 runner, build %s\n", GDPS4_BUILD);   // check this matches the PKG you installed
     notify("gdps4: starting Geometry Dash...");
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.__sa_handler.__sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;   // OpenOrbis' sa_sigaction macro is broken

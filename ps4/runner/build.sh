@@ -17,7 +17,8 @@ CONTENT_ID="IV0000-GDPS00004_00-GDPS4RUNNER00000"
 OUT=build
 mkdir -p "$OUT/obj" "$OUT/pkg/sce_sys/about" "$OUT/pkg/sce_module"
 
-CXXFLAGS=(--target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O1 -std=gnu++17
+BUILD_ID="$(date +%Y%m%d-%H%M)-$(git -C ../.. rev-parse --short HEAD 2>/dev/null || echo nogit)"
+CXXFLAGS=(-DGDPS4_BUILD="\"$BUILD_ID\"" --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O1 -std=gnu++17
           -isysroot "$TC" -isystem "$TC/include/c++/v1" -isystem "$TC/include")
 for src in main.cpp desktop.cpp gl_piglet.cpp ../../loader/src/pe_loader.cpp ../../win32/kernel32.cpp ../../win32/platform_posix.cpp; do
   "$LLVM/clang++" "${CXXFLAGS[@]}" -c "$src" -o "$OUT/obj/$(basename "${src%.cpp}").o"
@@ -54,3 +55,4 @@ FILES="eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png $(
 "$BIN/create-gp4.exe" -out pkg.gp4 --content-id="$CONTENT_ID" --files "$FILES"
 "$BIN/PkgTool.Core.exe" pkg_build pkg.gp4 ..
 ls -la ../*.pkg
+echo "build id: $BUILD_ID"
