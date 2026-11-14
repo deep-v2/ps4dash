@@ -129,7 +129,7 @@ PS4) and `robtop_code` (calling RobTop's `CCPoint(3,4)`, `operator+` and `ccpLen
 expects (3,4), (4.5,2) and 5).
 Notes: `-std=gnu++17` is required (OpenOrbis libc++ needs BSD extensions), and `PkgTool.Core` needs
 `DOTNET_ROLL_FORWARD=Major` on machines without .NET Core 3.0.
-| M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | **In progress.** Done on PC: MS runtimes + media libs PE-loaded (M4a); portable Win32 layer runs the game to the menu (M4b). Remaining: SEH dispatcher for PS4, PS4 runner. |
+| M4 | kernel32/CRT shims, DllMain/TLS, reach `cocos2d::CCApplication::run` | PS4 | **Done on console (2026-11-14).** All 15 images load on PS4, all 14 `DllMain`s succeed (MS CRT/STL, media libs, libcocos2d, libExtensions), `GeometryDash.exe` runs its startup and calls into the controller API. Open: SEH dispatcher on PS4 (no exception thrown so far). |
 
 ### M4 approach: Microsoft's own runtimes + a portable Win32 layer
 - **M4a:** `ucrtbase`, `msvcp140`, `vcruntime140(_1)` (from System32) and the game's zlib/libpng/jpeg/tiff/
@@ -156,6 +156,15 @@ bash ps4/runner/build.sh                      # -> ps4/runner/build/IV0000-GDPS0
 ```
 On the PS4: upload the contents of `stage/game` to `/data/gdps4/game`, install the PKG, start
 "Geometry Dash (gdps4)". Result: notification + `/data/gdps4/runner.log`.
+Console runs (owner's PS4):
+1. Stopped in `libExtensions` `DllMain` at `libcurl!curl_easy_init`. Fixed with an **offline network**
+   shim: curl's API with every transfer failing (`CURLE_COULDNT_CONNECT`), websocket contexts not created.
+   GD treats this like no internet (online levels/leaderboards/sync unavailable) until a real PS4
+   network backend exists.
+2. All `DllMain`s OK, entered `GeometryDash.exe`, stopped at `xinput1_4!#2` (`XInputGetState`).
+   Implemented on `scePad`: the DualShock 4 is XInput controller 0 (Cross=A, Circle=B, Square=X,
+   Triangle=Y, L1/R1, L3/R3, D-pad, OPTIONS=Start, touchpad click=Back, sticks, L2/R2 triggers).
+
 PS4 toolchain notes: OpenOrbis' `sa_sigaction` macro is broken (use `__sa_handler.__sa_sigaction`), its
 `mcontext_t` is Linux's layout (FreeBSD `mc_rip` is at ucontext+176), and libc lacks
 `__cxa_thread_atexit_impl` (provided in `platform_posix.cpp`).

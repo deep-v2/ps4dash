@@ -8,6 +8,8 @@
 #include "../../win32/win32.hpp"
 #include "../../win32/platform.hpp"
 #include <orbis/libkernel.h>
+#include <orbis/Pad.h>
+#include <orbis/UserService.h>
 #include <dirent.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -196,6 +198,50 @@ static void* net_lookup(const std::string& dll, const std::string& sym) {
     return nullptr;
 }
 
+// XInput on the DualShock 4 (scePad). GD reads controllers through XInputGetState (xinput1_4 #2);
+// the DS4 is presented as XInput controller 0, with GD's own Xbox-controller mapping applying.
+struct XINPUT_STATE { uint32_t packet; uint16_t buttons; uint8_t lt, rt; int16_t lx, ly, rx, ry; };
+static int g_pad = -1;
+static uint32_t g_pad_packet;
+static void pad_open() {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    int32_t user = -1;
+    sceUserServiceInitialize(nullptr);
+    if (sceUserServiceGetInitialUser(&user) != 0) { logf("pad: no initial user\n"); return; }
+    if (scePadInit() != 0) { logf("pad: scePadInit failed\n"); return; }
+    g_pad = scePadOpen(user, 0, 0, nullptr);
+    logf("pad: scePadOpen(user %d) -> %d\n", user, g_pad);
+}
+static int16_t stick_axis(uint8_t v, bool invert) {
+    int s = ((int)v - 128) * 257;   // 0..255 -> about -32896..32639
+    if (invert) s = -s - 1;
+    return (int16_t)std::max(-32768, std::min(32767, s));
+}
+MSABI static uint32_t XInputGetState(uint32_t index, XINPUT_STATE* st) {
+    if (index != 0) return 1167;   // ERROR_DEVICE_NOT_CONNECTED
+    pad_open();
+    OrbisPadData d; memset(&d, 0, sizeof d);
+    if (g_pad < 0 || scePadReadState(g_pad, &d) != 0 || !d.connected) return 1167;
+    uint32_t b = d.buttons; uint16_t x = 0;
+    if (b & ORBIS_PAD_BUTTON_UP) x |= 0x0001;      if (b & ORBIS_PAD_BUTTON_DOWN) x |= 0x0002;
+    if (b & ORBIS_PAD_BUTTON_LEFT) x |= 0x0004;    if (b & ORBIS_PAD_BUTTON_RIGHT) x |= 0x0008;
+    if (b & ORBIS_PAD_BUTTON_OPTIONS) x |= 0x0010; if (b & ORBIS_PAD_BUTTON_TOUCH_PAD) x |= 0x0020;   // START, BACK
+    if (b & ORBIS_PAD_BUTTON_L3) x |= 0x0040;      if (b & ORBIS_PAD_BUTTON_R3) x |= 0x0080;
+    if (b & ORBIS_PAD_BUTTON_L1) x |= 0x0100;      if (b & ORBIS_PAD_BUTTON_R1) x |= 0x0200;
+    if (b & ORBIS_PAD_BUTTON_CROSS) x |= 0x1000;   if (b & ORBIS_PAD_BUTTON_CIRCLE) x |= 0x2000;     // A, B
+    if (b & ORBIS_PAD_BUTTON_SQUARE) x |= 0x4000;  if (b & ORBIS_PAD_BUTTON_TRIANGLE) x |= 0x8000;   // X, Y
+    static uint16_t last; static uint32_t last_buttons;
+    if (x != last || b != last_buttons) g_pad_packet++;
+    last = x; last_buttons = b;
+    st->packet = g_pad_packet; st->buttons = x;
+    st->lt = d.analogButtons.l2; st->rt = d.analogButtons.r2;
+    st->lx = stick_axis(d.leftStick.x, false); st->ly = stick_axis(d.leftStick.y, true);
+    st->rx = stick_axis(d.rightStick.x, false); st->ry = stick_axis(d.rightStick.y, true);
+    return 0;
+}
+
 // LoadLibrary/GetModuleHandle of DLLs the Win32 layer implements (kernel32, apisets, ...):
 // a pseudo module whose GetProcAddress answers from the layer, like a real loaded DLL.
 static std::map<std::string, std::unique_ptr<uint8_t[]>> g_pseudo;
@@ -228,6 +274,7 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
     }
     if (dll == "shell32.dll" && sym == "SHGetFolderPathA") return (void*)&shim_SHGetFolderPathA;
     if (void* p = net_lookup(dll, sym)) return p;
+    if (dll == "xinput1_4.dll" && (sym == "#2" || sym == "XInputGetState")) return (void*)&XInputGetState;
     if (dll == "steam_api64.dll") {
         if (sym == "SteamInternal_SteamAPI_Init") return (void*)&steam_init_ok;
         if (sym == "SteamInternal_ContextInit") return (void*)&steam_context_init;
