@@ -603,12 +603,12 @@ W32 BOOL FlsSetValue(DWORD i, LPVOID v) { if (i >= kTlsSlots) return FALSE_; t_f
 
 // --- threads ---
 using ThreadProc = DWORD (W32*)(void*);
-W32 HANDLE CreateThread(void*, SIZE_T, ThreadProc start, void* param, DWORD flags, DWORD* tid_out) {
+W32 HANDLE CreateThread(void*, SIZE_T stack_size, ThreadProc start, void* param, DWORD flags, DWORD* tid_out) {
     auto t = std::make_shared<Thread>();
     t->suspended = flags & 0x4;   // CREATE_SUSPENDED
     HANDLE h = add_handle(t);
     std::mutex id_mx; std::condition_variable id_cv; bool have_id = false;
-    std::thread([t, start, param, &id_mx, &id_cv, &have_id] {
+    plat::start_thread([t, start, param, &id_mx, &id_cv, &have_id] {
         void* teb = attach_current_thread();
         t_self = t; t->tid = plat::thread_id();
         { std::lock_guard<std::mutex> l(id_mx); have_id = true; } id_cv.notify_one();
@@ -619,7 +619,7 @@ W32 HANDLE CreateThread(void*, SIZE_T, ThreadProc start, void* param, DWORD flag
         if (g_h.thread_detach) g_h.thread_detach(teb);
         { std::lock_guard<std::mutex> l(g_wait_mx); t->exit_code = rc; t->done = true; }
         g_wait_cv.notify_all();
-    }).detach();
+    }, stack_size ? stack_size : (1u << 20));   // Windows default: 1 MB
     { std::unique_lock<std::mutex> l(id_mx); id_cv.wait(l, [&] { return have_id; }); }
     if (tid_out) *tid_out = (DWORD)t->tid;
     return h;
@@ -661,7 +661,7 @@ struct PoolTimer { void* cb; void* ctx; std::atomic<uint64_t> gen{0}; };
 struct PoolWait { void* cb; void* ctx; std::atomic<uint64_t> gen{0}; };
 W32 void* CreateThreadpoolWork(void* cb, void* ctx, void*) { return new PoolWork{cb, ctx}; }
 W32 void SubmitThreadpoolWork(PoolWork* w) {
-    std::thread([w] { attach_current_thread(); ((void (W32*)(void*, void*, void*))w->cb)(nullptr, w->ctx, w); }).detach();
+    plat::start_thread([w] { attach_current_thread(); ((void (W32*)(void*, void*, void*))w->cb)(nullptr, w->ctx, w); }, 1u << 20);
 }
 W32 void CloseThreadpoolWork(PoolWork*) {}   // may still be running; leaked deliberately
 W32 void* CreateThreadpoolTimer(void* cb, void* ctx, void*) { auto* t = new PoolTimer; t->cb = cb; t->ctx = ctx; return t; }
@@ -670,7 +670,7 @@ W32 void SetThreadpoolTimer(PoolTimer* t, const FILETIME* due, DWORD period, DWO
     if (!due) return;   // NULL cancels
     int64_t d = (int64_t)get_ft(due);
     int64_t delay_ms = d < 0 ? -d / 10000 : std::max<int64_t>(0, (d - (int64_t)now_filetime()) / 10000);
-    std::thread([t, g, delay_ms, period] {
+    plat::start_thread([t, g, delay_ms, period] {
         attach_current_thread();
         plat::sleep_ms((uint32_t)delay_ms);
         do {
@@ -678,7 +678,7 @@ W32 void SetThreadpoolTimer(PoolTimer* t, const FILETIME* due, DWORD period, DWO
             ((void (W32*)(void*, void*, void*))t->cb)(nullptr, t->ctx, t);
             if (period) plat::sleep_ms(period);
         } while (period);
-    }).detach();
+    }, 1u << 20);
 }
 W32 void WaitForThreadpoolTimerCallbacks(PoolTimer* t, BOOL cancel) { if (cancel) ++t->gen; }
 W32 void CloseThreadpoolTimer(PoolTimer* t) { ++t->gen; }
@@ -688,11 +688,11 @@ W32 void SetThreadpoolWait(PoolWait* w, HANDLE h, const FILETIME* timeout) {
     if (!h) return;
     DWORD ms = 0xFFFFFFFF;
     if (timeout) { int64_t d = (int64_t)get_ft(timeout); ms = (DWORD)(d < 0 ? -d / 10000 : 0); }
-    std::thread([w, g, h, ms] {
+    plat::start_thread([w, g, h, ms] {
         attach_current_thread();
         DWORD r = WaitForSingleObject(h, ms);
         if (w->gen == g) ((void (W32*)(void*, void*, void*, DWORD))w->cb)(nullptr, w->ctx, w, r);
-    }).detach();
+    }, 1u << 20);
 }
 W32 void CloseThreadpoolWait(PoolWait* w) { ++w->gen; }
 W32 void FreeLibraryWhenCallbackReturns(void*, void*) {}

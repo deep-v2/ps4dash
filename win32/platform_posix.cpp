@@ -115,7 +115,20 @@ bool set_gs_base(void* teb) {
     __asm__ volatile("syscall; setc %1" : "=a"(ret), "=r"(cf) : "a"(165L), "D"(131L), "S"(&base) : "rcx", "r11", "memory");
     return !cf && ret == 0;
 }
-unsigned cpu_count() { return 6; }   // games get 6 (7 on later firmwares) of the 8 Jaguar cores
+unsigned cpu_count() { return 6; }
+void start_thread(std::function<void()> fn, size_t stack_size) {
+    auto* heap_fn = new std::function<void()>(std::move(fn));
+    pthread_attr_t attr; pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, stack_size < 0x40000 ? 0x40000 : stack_size);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t th;
+    int rc = pthread_create(&th, &attr, [](void* a) -> void* {
+        auto* f = (std::function<void()>*)a; (*f)(); delete f; return nullptr;
+    }, heap_fn);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) { char b[96]; snprintf(b, sizeof b, "gdps4: pthread_create failed (%d)
+", rc); debug_log(b); delete heap_fn; }
+}   // games get 6 (7 on later firmwares) of the 8 Jaguar cores
 void exit_process(int code) { _exit(code); }
 void debug_log(const char* msg) { printf("%s", msg); }
 

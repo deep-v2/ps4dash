@@ -123,6 +123,13 @@ void thread_yield() { SwitchToThread(); }
 void sleep_ms(uint32_t ms) { Sleep(ms); }
 bool set_gs_base(void*) { return false; }   // Windows already has a real TEB on every thread
 unsigned cpu_count() { return std::thread::hardware_concurrency(); }
+void start_thread(std::function<void()> fn, size_t stack_size) {
+    auto* heap_fn = new std::function<void()>(std::move(fn));
+    HANDLE h = CreateThread(nullptr, stack_size, [](LPVOID a) -> DWORD {
+        auto* f = (std::function<void()>*)a; (*f)(); delete f; return 0;
+    }, heap_fn, 0, nullptr);
+    if (h) CloseHandle(h); else delete heap_fn;
+}
 void exit_process(int code) { ExitProcess((UINT)code); }
 void debug_log(const char* msg) { OutputDebugStringA(msg); fputs(msg, stderr); }
 

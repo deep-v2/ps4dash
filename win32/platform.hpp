@@ -6,6 +6,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,9 @@ void sleep_ms(uint32_t ms);
 // PS4: sysarch(AMD64_SET_GSBASE). Windows host: returns false (threads already have a real TEB).
 bool set_gs_base(void* teb);
 unsigned cpu_count();
+// Start a detached thread with an explicit stack size (Windows code assumes ~1 MB stacks;
+// platform defaults can be far smaller - the PS4's overflowed silently).
+void start_thread(std::function<void()> fn, size_t stack_size);
 
 // ---- process ----
 [[noreturn]] void exit_process(int code);
