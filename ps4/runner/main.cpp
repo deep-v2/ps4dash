@@ -420,6 +420,7 @@ int main() {
     desktop::Hooks dh; dh.log = [](const char* m) { logf("%s", m); }; dh.hinstance = wh.exe_base;
     desktop::init(dh);
     gl::Hooks gh; gh.log = [](const char* m) { logf("%s", m); }; gh.make_stub = [](const std::string& n) { return make_stub(n); };
+    gh.fatal = [](const char* why) { halt(why); };
     gl::init(gh);
 
     // 3. Main thread TEB + static TLS.

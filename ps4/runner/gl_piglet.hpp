@@ -8,6 +8,7 @@ struct Hooks {
     void (*log)(const char*) = nullptr;
     // Creates a stub that stops the run and reports `name` if called (runner's make_stub).
     std::function<void*(const std::string& name)> make_stub;
+    void (*fatal)(const char* why) = nullptr;   // stops the run with a message (runner's halt)
 };
 void init(const Hooks& h);
 void* lookup(const std::string& sym);   // opengl32.dll export (gl*, wgl*), or nullptr

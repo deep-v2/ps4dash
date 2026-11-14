@@ -28,35 +28,59 @@ void log(const char* fmt, ...) {
 }
 
 // ---- Piglet bring-up (first wglCreateContext) --------------------------------------------
+size_t free_flexible() {
+    size_t sz = 0;   // OpenOrbis declares this with a size_t parameter; the real one takes size_t*
+    ((int32_t (*)(size_t*))&sceKernelAvailableFlexibleMemorySize)(&sz);
+    return sz;
+}
 bool load_modules() {
-    std::string prefix = std::string("/") + sceKernelGetFsSandboxRandomWord() + "/common/lib/";
+    std::string sandbox = std::string("/") + sceKernelGetFsSandboxRandomWord();
     int start_ret = 0;
-    int pig = sceKernelLoadStartModule((prefix + "libScePigletv2VSH.sprx").c_str(), 0, nullptr, 0, nullptr, &start_ret);
+    int pig = sceKernelLoadStartModule((sandbox + "/common/lib/libScePigletv2VSH.sprx").c_str(), 0, nullptr, 0, nullptr, &start_ret);
     log("gl: load libScePigletv2VSH -> %#x\n", pig);
     if (pig < 0) return false;
-    // Runtime GLSL compiler: cocos2d compiles its shaders from source at startup.
-    int shacc = sceKernelLoadStartModule((prefix + "libSceShaccVSH.sprx").c_str(), 0, nullptr, 0, nullptr, &start_ret);
-    log("gl: load libSceShaccVSH (runtime shader compiler) -> %#x\n", shacc);
+    // Runtime GLSL compiler: cocos2d compiles its shaders from source at startup. Try the known locations.
+    const std::string paths[] = {sandbox + "/common/lib/libSceShaccVSH.sprx", "/system/common/lib/libSceShaccVSH.sprx",
+                                 sandbox + "/priv/lib/libSceShaccVSH.sprx", "/system/priv/lib/libSceShaccVSH.sprx",
+                                 "/system_ex/common_ex/lib/libSceShaccVSH.sprx"};
+    for (auto& p : paths) {
+        int r = sceKernelLoadStartModule(p.c_str(), 0, nullptr, 0, nullptr, &start_ret);
+        log("gl: load %s -> %#x\n", p.c_str(), r);
+        if (r >= 0) break;
+    }
     return true;
 }
-bool init_egl() {
-    if (g_display != EGL_NO_DISPLAY) return true;
-    if (!load_modules()) return false;
+bool try_config(uint64_t sys_mb, uint64_t video_mb, uint64_t flex_mb) {
     OrbisPglConfig cfg; memset(&cfg, 0, sizeof cfg);
     cfg.size = sizeof cfg;
     cfg.flags = ORBIS_PGL_FLAGS_USE_COMPOSITE_EXT | ORBIS_PGL_FLAGS_USE_FLEXIBLE_MEMORY | 0x60;
     cfg.processOrder = 1;
-    cfg.systemSharedMemorySize = 250ull << 20;
-    cfg.videoSharedMemorySize = 512ull << 20;
-    cfg.maxMappedFlexibleMemory = 170ull << 20;
+    cfg.systemSharedMemorySize = sys_mb << 20;
+    cfg.videoSharedMemorySize = video_mb << 20;
+    cfg.maxMappedFlexibleMemory = flex_mb << 20;
     cfg.drawCommandBufferSize = 1 << 20;
     cfg.lcueResourceBufferSize = 1 << 20;
     cfg.dbgPosCmd_0x40 = kWidth; cfg.dbgPosCmd_0x44 = kHeight;
     cfg.unk_0x5C = 2;
-    if (!scePigletSetConfigurationVSH(&cfg)) { log("gl: scePigletSetConfigurationVSH failed\n"); return false; }
+    bool set = scePigletSetConfigurationVSH(&cfg);
     g_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLint major = 0, minor = 0;
-    if (g_display == EGL_NO_DISPLAY || !eglInitialize(g_display, &major, &minor)) { log("gl: eglInitialize failed %#x\n", eglGetError()); return false; }
+    bool init = g_display != EGL_NO_DISPLAY && eglInitialize(g_display, &major, &minor);
+    log("gl: piglet config sys=%lluMB video=%lluMB flex=%lluMB: set=%d display=%p init=%d err=%#x (free flexible %zuMB)\n",
+        (unsigned long long)sys_mb, (unsigned long long)video_mb, (unsigned long long)flex_mb, set, g_display, init,
+        eglGetError(), free_flexible() >> 20);
+    if (!init) g_display = EGL_NO_DISPLAY;
+    return init;
+}
+bool init_egl() {
+    if (g_display != EGL_NO_DISPLAY) return true;
+    log("gl: free flexible memory before Piglet: %zuMB\n", free_flexible() >> 20);
+    if (!load_modules()) return false;
+    // The sample's sizes suit a tiny demo; the game has already used flexible memory, so step down.
+    const uint64_t cfgs[][3] = {{250, 512, 170}, {128, 256, 128}, {96, 192, 96}, {64, 128, 64}, {32, 64, 32}};
+    bool ok = false;
+    for (auto& c : cfgs) if ((ok = try_config(c[0], c[1], c[2]))) break;
+    if (!ok) return false;
     eglBindAPI(EGL_OPENGL_ES_API);
     // GD needs a stencil buffer (cocos2d clipping nodes). Try depth+stencil, then fall back.
     const EGLint ds[][2] = {{24, 8}, {16, 8}, {0, 8}, {0, 0}};
@@ -75,14 +99,19 @@ bool init_egl() {
     const EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
     g_context = eglCreateContext(g_display, config, EGL_NO_CONTEXT, ctx_attribs);
     if (g_context == EGL_NO_CONTEXT) { log("gl: eglCreateContext failed %#x\n", eglGetError()); return false; }
-    log("gl: EGL %d.%d ready, %dx%d\n", major, minor, kWidth, kHeight);
+    log("gl: EGL ready, %dx%d\n", kWidth, kHeight);
     return true;
 }
 
 // ---- WGL ---------------------------------------------------------------------------------
 void* const kHGLRC = (void*)0x6C0001;
 void* g_cur_dc;
-MSABI void* wglCreateContext(void*) { return init_egl() ? kHGLRC : nullptr; }
+MSABI void* wglCreateContext(void*) {
+    if (init_egl()) return kHGLRC;
+    // Without a context cocos2d's GLFW error callback recurses until the stack overflows (CE-34878-0).
+    if (g_h.fatal) g_h.fatal("could not create the OpenGL context (Piglet/EGL), see gl: lines above");
+    return nullptr;
+}
 MSABI int wglDeleteContext(void*) { return 1; }
 MSABI int wglMakeCurrent(void* dc, void* rc) {
     if (!rc) { eglMakeCurrent(g_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); g_current = false; g_cur_dc = nullptr; return 1; }
