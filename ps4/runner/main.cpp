@@ -391,7 +391,8 @@ int main() {
 #ifndef GDPS4_BUILD
 #define GDPS4_BUILD "dev"
 #endif
-    logf("gdps4 runner, build %s\n", GDPS4_BUILD);   // check this matches the PKG you installed
+    logf("gdps4 runner, build %s\n", GDPS4_BUILD);
+    logf("runner: on_kernel_exception at %p (resolve runner addresses against runner.elf)\n", (void*)&on_kernel_exception);   // check this matches the PKG you installed
     notify("gdps4: starting Geometry Dash...");
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.__sa_handler.__sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;   // OpenOrbis' sa_sigaction macro is broken
