@@ -11,6 +11,7 @@
 #include <string.h>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 #define MSABI __attribute__((ms_abi))
@@ -80,7 +81,8 @@ MSABI void* wglCreateContext(void* dc) {
     return kHGLRC;
 }
 MSABI int wglDeleteContext(void*) { return 1; }
-MSABI int wglMakeCurrent(void* dc, void* rc) { g_current = rc != nullptr; if (dc) g_dc = dc; return 1; }
+MSABI int wglMakeCurrent(void* dc, void* rc) {
+    log("gl: wglMakeCurrent(%p, %p)\n", dc, rc); g_current = rc != nullptr; if (dc) g_dc = dc; return 1; }
 MSABI void* wglGetCurrentContext() { return g_current ? kHGLRC : nullptr; }
 MSABI void* wglGetCurrentDC() { return g_current ? g_dc : nullptr; }
 MSABI int wglShareLists(void*, void*) { return 1; }
@@ -121,6 +123,7 @@ void* find(const std::string& n) {
     return nullptr;
 }
 MSABI void* wglGetProcAddress(const char* name) {
+    { static std::set<std::string> seen; if (seen.insert(name).second) log("gl: wglGetProcAddress(%s)\n", name); }
     if (void* p = find(name)) return p;
     if (strncmp(name, "gl", 2) == 0 && g_h.make_stub) {
         // Desktop-only GL entry point: glew needs it non-null; the stub stops the run with its name if called.
@@ -152,6 +155,8 @@ void* lookup(const std::string& sym) {
     return nullptr;
 }
 bool swap_buffers() {
+    static int n = 0; bool trace = n++ < 3;
+    if (trace) log("gl: SwapBuffers #%d begin\n", n);
     if (g_video < 0) return false;
     uint64_t t0 = now_us();
     int w, h; const uint32_t* src = swgl::default_framebuffer(&w, &h);
@@ -165,6 +170,7 @@ bool swap_buffers() {
         for (int x = 0; x < w; x++) { uint32_t c = s[x]; d[x] = (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); }
     }
     sceVideoOutSubmitFlip(g_video, g_back, ORBIS_VIDEO_OUT_FLIP_VSYNC, ++g_frame);
+    if (trace) log("gl: SwapBuffers #%d flipped\n", n);
     g_back ^= 1;
     uint64_t t1 = now_us();
     g_present_us += t1 - t0; g_frames++;

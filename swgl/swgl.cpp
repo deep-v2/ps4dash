@@ -751,6 +751,8 @@ void draw(GLenum mode, int count, const std::function<int(int)>& index) {
 }  // namespace
 
 // ================================ public API ======================================================
+// Breadcrumbs: log the first call of key operations (the PS4 kills the app on a fault without a signal).
+static void crumb(const char* what) { static std::set<std::string> seen; if (seen.insert(what).second) logf("swgl: first %s\n", what); }
 void set_render_threads(int n) { g_thread_override = n; }
 void set_default_framebuffer_size(int w, int h) {
     if (w == g_def_w && h == g_def_h) return;
@@ -774,7 +776,7 @@ void glBindTexture(GLenum target, GLuint tex) {
     if (tex && !g_textures.count(tex)) g_textures[tex] = std::make_unique<Texture>();
     g_bound_tex[g_active_unit] = tex;
 }
-void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum type, const void* pixels) {
+void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum type, const void* pixels) { crumb("glTexImage2D");
     if (level != 0) return;   // no mipmaps: sampling uses level 0
     Texture* t = bound_texture(g_active_unit);
     if (!t) { set_error(E_INVALID_OPERATION); return; }
@@ -938,7 +940,7 @@ static int uniform_location(Program& p, const std::string& name) {
     p.uniform_loc[name] = loc;
     return loc;
 }
-void glLinkProgram(GLuint pn) {
+void glLinkProgram(GLuint pn) { crumb("glLinkProgram");
     auto it = g_programs.find(pn); if (it == g_programs.end()) { set_error(E_INVALID_VALUE); return; }
     Program& p = *it->second;
     p.vsrc.clear(); p.fsrc.clear();
@@ -1141,7 +1143,7 @@ void glScissor(GLint x, GLint y, GLsizei w, GLsizei h) { g_scissor_box[0] = x; g
 void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { g_clear_color[0] = r; g_clear_color[1] = g; g_clear_color[2] = b; g_clear_color[3] = a; }
 void glClearDepthf(GLfloat d) { g_clear_depth = d; }
 void glClearStencil(GLint s) { g_clear_stencil = s; }
-void glClear(GLbitfield mask) {
+void glClear(GLbitfield mask) { crumb("glClear");
     static int calls = 0;
     if (getenv("SWGL_DEBUG") && ++calls % 30 == 0) logf("swgl: glClear #%d (fb %u)\n", calls, g_bound_fb);
     Target t = target(); if (!t.color) return;
@@ -1174,8 +1176,8 @@ void glFinish() {}
 void glFlush() {}
 
 // --- draws
-void glDrawArrays(GLenum mode, GLint first, GLsizei count) { draw(mode, count, [&](int i) { return first + i; }); }
-void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+void glDrawArrays(GLenum mode, GLint first, GLsizei count) { crumb("glDrawArrays"); draw(mode, count, [&](int i) { return first + i; }); }
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) { crumb("glDrawElements");
     const uint8_t* base = (const uint8_t*)indices;
     if (g_element_buffer) { Buffer* b = bound_buffer(E_ELEMENT_ARRAY_BUFFER); if (!b) return; base = b->data.data() + (uintptr_t)indices; }
     if (!base) return;
