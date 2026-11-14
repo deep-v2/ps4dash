@@ -206,6 +206,21 @@ functions, all core GLES2.
   at 1080p on Jaguar unproven); (b) GNM directly (`libSceGnmDriver` is present; fastest, but needs a GLES2
   layer on GNM plus a GLSL -> GCN shader compiler without Sony tools); (c) run on a 5.05-9.00/11.00 console
   where Piglet is known to work (still no runtime shader compiler).
+- **Decision (owner): (a) software renderer.**
+
+#### swgl: software OpenGL ES 2.0 (`swgl/`)
+- Full GLES2 object model (textures in all GLES2 formats, buffers, FBOs/renderbuffers, programs,
+  uniforms/attributes), scissor, stencil, depth, all blend factors/equations, masks, clears, `glReadPixels`.
+- Shaders: the game compiles 15 cocos2d built-in shaders at startup (dumped with `GDPS4_SHADERDUMP=1` into
+  `shaders/`); they're recognized by content and run as C++. Unknown shaders (e.g. GD 2.2 shader-layer
+  effects; GD.exe contains ~27 such fragment shaders) are logged once with their source and drawn as
+  texture*color - a known, visible gap until translated.
+- Speed (PC, GD main menu, 1366x768): first scalar version 103 ms/frame (9.6 fps) -> span rasterizer with
+  integer fast path 23 ms (41 fps) -> 6 render threads: 60 fps (game's cap). PS4 estimate: ~30-45 fps at
+  1280x720 on 6 Jaguar cores; unmeasured until the console run.
+- PC validation: `GDPS4_WIN32=1 GDPS4_SWGL=1` runs the real game on swgl and shows it in the real window.
+- PS4 (`ps4/runner/gl_swgl.cpp`): game sees a 1280x720 screen; `SwapBuffers` converts RGBA bottom-up to
+  BGRA top-down into a double-buffered `sceVideoOut` surface and flips on vsync; frame rate logged every 5 s.
 | M6 | FMOD shim, DS4 input, save data → playable levels | PS4 | Pending |
 | M7 | PKG + install docs | PS4 | Pending |
 | M8 | Geode.dll loading | PS4 | Pending |
