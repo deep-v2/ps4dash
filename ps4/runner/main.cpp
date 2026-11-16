@@ -447,7 +447,7 @@ int main() {
     // Heartbeat: if these lines stop together with the main thread, the whole process was killed
     // from outside; if they keep going, only a game thread is stuck or gone.
     plat::start_thread([] {
-        for (unsigned n = 1;; n++) {
+        for (unsigned n = 1; n <= 240; n++) {   // first minute only
             size_t flex = 0; ((int32_t (*)(size_t*))&sceKernelAvailableFlexibleMemorySize)(&flex);
             logf("heartbeat %u: flexible memory free %zu MB""\n", n, flex >> 20);
             sceKernelUsleep(250000);

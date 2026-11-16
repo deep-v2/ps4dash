@@ -491,7 +491,10 @@ W32 void WakeAllConditionVariable(void* cv) { lazy<std::condition_variable_any>(
 template <class M> BOOL cv_sleep(void* cv, M& m, DWORD ms) {
     auto* c = lazy<std::condition_variable_any>(cv);
     if (ms == 0xFFFFFFFF) { c->wait(m); return TRUE_; }
-    if (c->wait_for(m, std::chrono::milliseconds(ms)) == std::cv_status::timeout) { set_err(E_TIMEOUT); return FALSE_; }
+    // Timed condition-variable waits kill the process on PS4 (seen in GetMessageA, build
+    // 20261116-2017), so a timed sleep is a short unlocked nap: a permitted spurious wakeup.
+    if (ms == 0) { set_err(E_TIMEOUT); return FALSE_; }
+    m.unlock(); plat::sleep_ms(1); m.lock();
     return TRUE_;
 }
 W32 BOOL SleepConditionVariableSRW(void* cv, void* srw, DWORD ms, ULONG) { return cv_sleep(cv, *lazy<std::mutex>(srw), ms); }
@@ -574,9 +577,12 @@ W32 DWORD WaitForMultipleObjects(DWORD n, const HANDLE* hs, BOOL all, DWORD ms) 
     int r;
     if (ms == 0xFFFFFFFF) { while ((r = ready()) < 0) g_wait_cv.wait(l); }
     else {
-        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-        while ((r = ready()) < 0)
-            if (g_wait_cv.wait_until(l, until) == std::cv_status::timeout && (r = ready()) < 0) return 0x102;
+        // Poll instead of wait_until: timed cv waits kill the process on PS4 (see cv_sleep).
+        uint64_t until = plat::monotonic_ns() + (uint64_t)ms * 1000000ull;
+        while ((r = ready()) < 0) {
+            if (plat::monotonic_ns() >= until) return 0x102;
+            l.unlock(); plat::sleep_ms(1); l.lock();
+        }
     }
     return (DWORD)r;
 }
