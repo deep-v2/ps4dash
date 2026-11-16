@@ -248,18 +248,24 @@ MSABI static uint32_t XInputGetState(uint32_t index, XINPUT_STATE* st) {
     return 0;
 }
 
-// Virtual mouse: left stick moves the cursor (speed grows with deflection), Cross is the left
-// button. Polled once per presented frame; GD still sees the pad through XInput as well.
+// Virtual mouse: the touchpad moves the cursor like a laptop trackpad (relative: drag, lift,
+// drag again) and R2 is the left button. The sticks and face buttons stay with GD's own
+// controller support (XInput). Polled once per presented frame.
 static void pad_mouse_frame() {
     pad_open();
     OrbisPadData d; memset(&d, 0, sizeof d);
     if (g_pad < 0 || scePadReadState(g_pad, &d) != 0 || !d.connected) return;
-    static uint64_t last = 0; uint64_t now = plat::monotonic_ns();
-    float dt = last ? std::min((now - last) / 1e9f, 0.1f) : 0.f; last = now;
-    auto axis = [](uint8_t v) { float f = ((int)v - 128) / 127.f; float dz = 0.18f;
-        if (std::fabs(f) < dz) return 0.f; f = (std::fabs(f) - dz) / (1 - dz) * (f < 0 ? -1.f : 1.f); return f * std::fabs(f); };
-    const float speed = 900.f;   // px/s at full deflection
-    desktop::mouse_input(axis(d.leftStick.x) * speed * dt, axis(d.leftStick.y) * speed * dt, d.buttons & ORBIS_PAD_BUTTON_CROSS);
+    static bool had = false; static uint8_t last_id; static int last_x, last_y;
+    float dx = 0, dy = 0;
+    if (d.touch.fingers > 0) {
+        const OrbisPadTouch& t = d.touch.touch[0];
+        if (had && t.finger == last_id) {
+            const float gain = 0.9f;   // screen px per touchpad unit (pad is 1920x942 units)
+            dx = (t.x - last_x) * gain; dy = (t.y - last_y) * gain;
+        }
+        had = true; last_id = t.finger; last_x = t.x; last_y = t.y;
+    } else had = false;
+    desktop::mouse_input(dx, dy, (d.buttons & ORBIS_PAD_BUTTON_R2) != 0);
 }
 
 // LoadLibrary/GetModuleHandle of DLLs the Win32 layer implements (kernel32, apisets, ...):
