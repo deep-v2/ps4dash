@@ -699,7 +699,16 @@ struct Pool {
 };
 Pool g_pool;
 
+// ---- per-frame cost accounting (read by the presenter) ---------------------------------------------
+uint64_t (*g_clock_ns)() = nullptr;
+uint64_t g_stat_draw_ns, g_stat_upload_ns, g_stat_clear_ns; int g_stat_draws, g_stat_verts;
+struct StatTimer {
+    uint64_t* acc; uint64_t t0;
+    explicit StatTimer(uint64_t* a) : acc(a), t0(g_clock_ns ? g_clock_ns() : 0) {}
+    ~StatTimer() { if (g_clock_ns) *acc += g_clock_ns() - t0; }
+};
 void draw(GLenum mode, int count, const std::function<int(int)>& index) {
+    StatTimer st_(&g_stat_draw_ns); g_stat_draws++; g_stat_verts += count;
     Program* p = current_program();
     if (!p || !p->linked) { set_error(E_INVALID_OPERATION); return; }
     Target t = target();
@@ -776,14 +785,14 @@ void glBindTexture(GLenum target, GLuint tex) {
     if (tex && !g_textures.count(tex)) g_textures[tex] = std::make_unique<Texture>();
     g_bound_tex[g_active_unit] = tex;
 }
-void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum type, const void* pixels) { crumb("glTexImage2D");
+void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum type, const void* pixels) { crumb("glTexImage2D"); StatTimer st_(&g_stat_upload_ns);
     if (level != 0) return;   // no mipmaps: sampling uses level 0
     Texture* t = bound_texture(g_active_unit);
     if (!t) { set_error(E_INVALID_OPERATION); return; }
     t->w = w; t->h = h; t->px.assign((size_t)w * h, 0);
     upload(t, 0, 0, w, h, format, type, pixels);
 }
-void glTexSubImage2D(GLenum, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) {
+void glTexSubImage2D(GLenum, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels) { StatTimer st_(&g_stat_upload_ns);
     if (level != 0) return;
     Texture* t = bound_texture(g_active_unit);
     if (!t || x < 0 || y < 0 || x + w > t->w || y + h > t->h) { set_error(E_INVALID_VALUE); return; }
@@ -1143,7 +1152,7 @@ void glScissor(GLint x, GLint y, GLsizei w, GLsizei h) { g_scissor_box[0] = x; g
 void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { g_clear_color[0] = r; g_clear_color[1] = g; g_clear_color[2] = b; g_clear_color[3] = a; }
 void glClearDepthf(GLfloat d) { g_clear_depth = d; }
 void glClearStencil(GLint s) { g_clear_stencil = s; }
-void glClear(GLbitfield mask) { crumb("glClear");
+void glClear(GLbitfield mask) { crumb("glClear"); StatTimer st_(&g_stat_clear_ns);
     static int calls = 0;
     if (getenv("SWGL_DEBUG") && ++calls % 30 == 0) logf("swgl: glClear #%d (fb %u)\n", calls, g_bound_fb);
     Target t = target(); if (!t.color) return;
@@ -1252,4 +1261,13 @@ const GLubyte* glGetString(GLenum name) {
     return nullptr;
 }
 
+}  // namespace swgl
+
+namespace swgl {
+void set_clock(uint64_t (*ns)()) { g_clock_ns = ns; }
+FrameStats take_frame_stats() {
+    FrameStats f{g_stat_draw_ns, g_stat_clear_ns, g_stat_upload_ns, g_stat_draws, g_stat_verts};
+    g_stat_draw_ns = g_stat_clear_ns = g_stat_upload_ns = 0; g_stat_draws = g_stat_verts = 0;
+    return f;
+}
 }  // namespace swgl

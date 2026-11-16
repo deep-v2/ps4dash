@@ -18,6 +18,11 @@ void set_render_threads(int n);
 void set_default_framebuffer_size(int w, int h);   // window / screen size (allocates the back buffer)
 // Default framebuffer, RGBA8 (R in the lowest byte), bottom-up rows (row 0 = bottom), width*height.
 const uint32_t* default_framebuffer(int* w, int* h);
+// Cost accounting: time spent in draws, clears and texture uploads since the last take (needs a
+// clock: on PS4 std::chrono::steady_clock is wrong, see platform_posix.cpp monotonic_ns).
+struct FrameStats { uint64_t draw_ns, clear_ns, upload_ns; int draws, verts; };
+void set_clock(uint64_t (*ns)());
+FrameStats take_frame_stats();
 
 // OpenGL ES 2.0 entry points (same names and semantics as gl2.h) --------------------------------
 void glActiveTexture(GLenum texture);

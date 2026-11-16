@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -265,8 +266,36 @@ MSABI HWND SetCapture(HWND h) { HWND o = g_capture; g_capture = h; return o; }
 MSABI BOOL ReleaseCapture() { g_capture = nullptr; return 1; }
 MSABI BOOL TrackMouseEvent(void*) { return 1; }
 MSABI UINT SendInput(UINT n, void*, int) { return n; }
-MSABI BOOL RegisterRawInputDevices(const void*, UINT, UINT) { return 1; }
-MSABI UINT GetRawInputData(void*, UINT, void*, UINT* size, UINT) { if (size) *size = 0; return 0; }
+// Raw input: GD's libcocos2d registers devices and reads mouse buttons from WM_INPUT on its
+// GD_RawInput thread, so the virtual mouse delivers RAWINPUT packets there too.
+struct RawReg { uint16_t page, usage; uint32_t flags; HWND target; };
+std::vector<RawReg> g_raw_regs;
+std::mutex g_raw_mx;
+std::map<uintptr_t, std::array<uint8_t, 48>> g_raw_packets;   // HRAWINPUT -> RAWINPUT (mouse, x64)
+uintptr_t g_raw_next = 0x7A0000;
+MSABI BOOL RegisterRawInputDevices(const uint8_t* devs, UINT n, UINT size) {
+    std::lock_guard<std::mutex> l(g_raw_mx);
+    for (UINT i = 0; devs && i < n && size >= 16; i++) {
+        RawReg r; memcpy(&r.page, devs + i * size, 2); memcpy(&r.usage, devs + i * size + 2, 2);
+        memcpy(&r.flags, devs + i * size + 4, 4); memcpy(&r.target, devs + i * size + 8, 8);
+        log("desktop: RegisterRawInputDevices page %#x usage %#x flags %#x target %p\n", r.page, r.usage, r.flags, r.target);
+        bool remove = r.flags & 0x1;   // RIDEV_REMOVE
+        g_raw_regs.erase(std::remove_if(g_raw_regs.begin(), g_raw_regs.end(), [&](const RawReg& o) { return o.page == r.page && o.usage == r.usage; }), g_raw_regs.end());
+        if (!remove) g_raw_regs.push_back(r);
+    }
+    return 1;
+}
+MSABI UINT GetRawInputData(void* h, UINT cmd, void* data, UINT* size, UINT header_size) {
+    if (!size || header_size != 24) return (UINT)-1;
+    std::lock_guard<std::mutex> l(g_raw_mx);
+    auto it = g_raw_packets.find((uintptr_t)h);
+    if (it == g_raw_packets.end()) return (UINT)-1;
+    UINT want = cmd == 0x10000005 /*RID_HEADER*/ ? 24 : 48;
+    if (!data) { *size = want; return 0; }
+    if (*size < want) { *size = want; return (UINT)-1; }
+    memcpy(data, it->second.data(), want);
+    return want;
+}
 MSABI UINT GetRawInputDeviceList(void*, UINT* n, UINT) { if (n) *n = 0; return 0; }
 MSABI UINT GetRawInputDeviceInfoA(void*, UINT, void*, UINT* size) { if (size) *size = 0; return (UINT)-1; }
 MSABI void* RegisterDeviceNotificationW(void*, void*, DWORD) { return (void*)0xD0D0; }
@@ -430,11 +459,37 @@ const std::map<std::string, void*>& dwmapi() {
 #undef E
 // ---- virtual mouse (controller-driven) -----------------------------------------------------------
 std::mutex g_mouse_mx;
+// RAWINPUT for a mouse event -> WM_INPUT to every window registered for the generic mouse
+// (usage page 1, usage 2), or the focused window when the registration has no target.
+void send_raw_mouse(int dx, int dy, uint16_t button_flags) {
+    std::vector<HWND> targets;
+    std::array<uint8_t, 48> pkt{};
+    uintptr_t handle;
+    {
+        std::lock_guard<std::mutex> l(g_raw_mx);
+        for (auto& r : g_raw_regs) if (r.page == 1 && r.usage == 2) targets.push_back(r.target ? r.target : g_focus);
+        if (targets.empty()) return;
+        uint32_t type = 0 /*RIM_TYPEMOUSE*/, sz = 48; uint64_t dev = 0x1, wp = 0 /*RIM_INPUT*/;
+        memcpy(&pkt[0], &type, 4); memcpy(&pkt[4], &sz, 4); memcpy(&pkt[8], &dev, 8); memcpy(&pkt[16], &wp, 8);
+        uint16_t flags = 0 /*MOUSE_MOVE_RELATIVE*/; int32_t lx = dx, ly = dy;
+        memcpy(&pkt[24], &flags, 2); memcpy(&pkt[28], &button_flags, 2);   // usButtonFlags (usButtonData = 0)
+        memcpy(&pkt[36], &lx, 4); memcpy(&pkt[40], &ly, 4);
+        handle = g_raw_next++;
+        g_raw_packets[handle] = pkt;
+        while (g_raw_packets.size() > 256) g_raw_packets.erase(g_raw_packets.begin());   // HRAWINPUT lives until read
+    }
+    static int logged = 0;
+    for (HWND t : targets) {
+        Window* w = win(t); if (!w) continue;
+        if (button_flags && logged < 6) { logged++; log("desktop: WM_INPUT mouse buttons %#x -> %p\n", button_flags, t); }
+        post_to_thread(w->thread, t, 0x00FF /*WM_INPUT*/, 0, (LPARAM)handle);
+    }
+}
 bool g_mouse_down, g_mouse_init;
 }  // namespace
 
 void mouse_input(float dx, float dy, bool down) {
-    POINT pos; bool moved, changed;
+    POINT pos, prev; bool moved, changed;
     {
         std::lock_guard<std::mutex> l(g_mouse_mx);
         if (!g_mouse_init) { g_cursor = {W() / 2, H() / 2}; g_mouse_init = true; }
@@ -442,7 +497,7 @@ void mouse_input(float dx, float dy, bool down) {
         fx += dx; fy += dy;
         int ix = (int)fx, iy = (int)fy; fx -= ix; fy -= iy;
         POINT np{std::max(0, std::min(W() - 1, (int)g_cursor.x + ix)), std::max(0, std::min(H() - 1, (int)g_cursor.y + iy))};
-        moved = np.x != g_cursor.x || np.y != g_cursor.y; g_cursor = np; pos = np;
+        prev = g_cursor; moved = np.x != g_cursor.x || np.y != g_cursor.y; g_cursor = np; pos = np;
         changed = down != g_mouse_down; g_mouse_down = down;
     }
     HWND h = g_capture ? g_capture : g_focus ? g_focus : g_active;
@@ -450,6 +505,7 @@ void mouse_input(float dx, float dy, bool down) {
     LPARAM lp = ((LPARAM)(pos.y & 0xFFFF) << 16) | (pos.x & 0xFFFF);
     if (moved) post_to_thread(w->thread, h, 0x0200 /*WM_MOUSEMOVE*/, down ? 1 : 0, lp);
     if (changed) post_to_thread(w->thread, h, down ? 0x0201 /*WM_LBUTTONDOWN*/ : 0x0202 /*WM_LBUTTONUP*/, down ? 1 : 0, lp);
+    if (moved || changed) send_raw_mouse(moved ? pos.x - prev.x : 0, moved ? pos.y - prev.y : 0, changed ? (down ? 0x1 : 0x2) : 0);
 }
 bool cursor_pos(int* x, int* y) {
     std::lock_guard<std::mutex> l(g_mouse_mx);

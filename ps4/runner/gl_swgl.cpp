@@ -144,10 +144,14 @@ MSABI void* wglGetProcAddress(const char* name) {
 
 // frame timing for the log
 uint64_t g_last_report_us; int g_frames; uint64_t g_present_us;
+uint64_t g_acc_draw_ns, g_acc_clear_ns, g_acc_upload_ns; long g_acc_draws, g_acc_verts;
 uint64_t now_us() { return (uint64_t)sceKernelGetProcessTime(); }
 }  // namespace
 
-void init(const Hooks& h) { g_h = h; swgl::set_log(h.log); }
+void init(const Hooks& h) {
+    g_h = h; swgl::set_log(h.log);
+    swgl::set_clock([]() -> uint64_t { return (uint64_t)sceKernelGetProcessTime() * 1000; });
+}
 bool early_init() {
     OrbisKernelSwVersion v; memset(&v, 0, sizeof v); v.Size = sizeof v;
     if (sceKernelGetSystemSwVersion(&v) == 0) log("gl: firmware %s, renderer: swgl (software) + video out\n", v.VersionString);
@@ -195,10 +199,18 @@ bool swap_buffers() {
     g_back ^= 1;
     uint64_t t1 = now_us();
     g_present_us += t1 - t0; g_frames++;
+    swgl::FrameStats fs = swgl::take_frame_stats();
+    g_acc_draw_ns += fs.draw_ns; g_acc_clear_ns += fs.clear_ns; g_acc_upload_ns += fs.upload_ns;
+    g_acc_draws += fs.draws; g_acc_verts += fs.verts;
     if (!g_last_report_us) g_last_report_us = t1;
     if (t1 - g_last_report_us >= 5000000) {
-        log("gl: %.1f fps (present %.1f ms/frame)\n", g_frames * 1e6 / (double)(t1 - g_last_report_us), g_present_us / 1000.0 / g_frames);
+        double frame_ms = (t1 - g_last_report_us) / 1000.0 / g_frames;
+        double draw = g_acc_draw_ns / 1e6 / g_frames, clear = g_acc_clear_ns / 1e6 / g_frames, up = g_acc_upload_ns / 1e6 / g_frames;
+        double present = g_present_us / 1000.0 / g_frames;
+        log("gl: %.1f fps | per frame %.1f ms = draw %.1f + clear %.1f + upload %.1f + present %.1f + game/other %.1f | %ld draws, %ld verts\n",
+            1000.0 / frame_ms, frame_ms, draw, clear, up, present, frame_ms - draw - clear - up - present, g_acc_draws / g_frames, g_acc_verts / g_frames);
         g_frames = 0; g_present_us = 0; g_last_report_us = t1;
+        g_acc_draw_ns = g_acc_clear_ns = g_acc_upload_ns = 0; g_acc_draws = g_acc_verts = 0;
     }
     return true;
 }
