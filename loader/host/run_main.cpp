@@ -8,6 +8,7 @@
 #include "../src/pe_loader.hpp"
 #include "../../win32/win32.hpp"
 #include "swgl_host.hpp"
+#include "../../win32/gdi_text.hpp"
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -314,6 +315,8 @@ static void* resolve(const std::string& dll_in, const std::string& sym) {
         return swgl_missing_stub("opengl32.dll!" + sym);
     }
     if (use_swgl() && dll == "gdi32.dll" && sym == "SwapBuffers") return swgl_host::swap_buffers_fn();
+    if (getenv("GDPS4_FAKEGDI") && (dll == "gdi32.dll" || dll == "user32.dll"))   // PS4 text path, tested on PC
+        if (void* p = gdps4::gditext::lookup(dll, sym)) return p;
     if (dll == "opengl32.dll" && sym == "glClear") return (void*)shim_glClear;
     if (dll == "opengl32.dll" && sym == "wglGetProcAddress") return (void*)shim_wglGetProcAddress;
     {
@@ -663,6 +666,7 @@ int main(int argc, char** argv) {
     hooks.protect = [](void*, size_t, bool, bool, bool) { return true; };
 
     g_hooks = hooks;
+    { gdps4::gditext::Hooks gh; gh.log = [](const char* m) { fprintf(g_log, "%s", m); fflush(g_log); }; gdps4::gditext::init(gh); }
     if (use_swgl()) {
         swgl_host::init([](const char* m) { fprintf(g_log, "%s", m); fflush(g_log); }, swgl_missing_stub);
         fprintf(g_log, "Renderer: swgl (software)\n");

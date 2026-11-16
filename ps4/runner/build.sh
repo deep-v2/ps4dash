@@ -19,9 +19,9 @@ mkdir -p "$OUT/obj" "$OUT/pkg/sce_sys/about" "$OUT/pkg/sce_module"
 rm -f "$OUT"/obj/*.o   # link exactly the sources listed below
 
 BUILD_ID="$(date +%Y%m%d-%H%M)-$(git -C ../.. rev-parse --short HEAD 2>/dev/null || echo nogit)"
-CXXFLAGS=(-DGDPS4_BUILD="\"$BUILD_ID\"" --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -std=gnu++17
+CXXFLAGS=(-DGDPS4_BUILD="\"$BUILD_ID\"" -DGDPS4_FONT="\"../../third_party/fonts/LiberationSans-Regular.ttf\"" --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -std=gnu++17
           -isysroot "$TC" -isystem "$TC/include/c++/v1" -isystem "$TC/include")
-for src in main.cpp desktop.cpp gl_swgl.cpp fmod_shim.cpp ../../swgl/swgl.cpp ../../swgl/shaders.cpp ../../loader/src/pe_loader.cpp ../../win32/kernel32.cpp ../../win32/platform_posix.cpp; do
+for src in main.cpp desktop.cpp gl_swgl.cpp fmod_shim.cpp ../../swgl/swgl.cpp ../../swgl/shaders.cpp ../../loader/src/pe_loader.cpp ../../win32/kernel32.cpp ../../win32/platform_posix.cpp ../../win32/gdi_text.cpp; do
   "$LLVM/clang++" "${CXXFLAGS[@]}" -c "$src" -o "$OUT/obj/$(basename "${src%.cpp}").o"
 done
 

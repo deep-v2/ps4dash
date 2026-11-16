@@ -10,6 +10,7 @@
 #include "desktop.hpp"
 #include "gl_piglet.hpp"
 #include "fmod_shim.hpp"
+#include "../../win32/gdi_text.hpp"
 #include <orbis/libkernel.h>
 #include <orbis/Pad.h>
 #include <orbis/UserService.h>
@@ -265,6 +266,7 @@ static bool is_native_dll(const std::string& d) {
 }
 static void* native_lookup(const std::string& dll, const std::string& sym) {
     if (dll == "opengl32.dll") return gl::lookup(sym);
+    if (void* p = gditext::lookup(dll, sym)) return p;   // GDI text: memory DCs, fonts, DrawTextW
     return desktop::lookup(dll, sym);   // user32, gdi32, shcore, dwmapi
     return nullptr;
 }
@@ -512,6 +514,9 @@ int main() {
     win32::init(wh);
     desktop::Hooks dh; dh.log = [](const char* m) { logf("%s", m); }; dh.hinstance = wh.exe_base;
     desktop::init(dh);
+    gditext::Hooks th; th.log = [](const char* m) { logf("%s", m); };
+    th.map_path = [](const std::u16string& p) { return map_path(std::string(p.begin(), p.end())); };   // font paths are ASCII
+    gditext::init(th);
     gl::Hooks gh; gh.log = [](const char* m) { logf("%s", m); }; gh.make_stub = [](const std::string& n) { return make_stub(n); };
     gh.fatal = [](const char* why) { halt(why); };
     gl::init(gh);
