@@ -235,8 +235,13 @@ MSABI BOOL PeekMessageW(MSG* msg, HWND h, UINT lo, UINT hi, UINT flags) { return
 MSABI BOOL GetMessageA(MSG* msg, HWND h, UINT lo, UINT hi) {
     for (;;) {
         if (take(msg, h, lo, hi, true)) return msg->message != 0x0012 /*WM_QUIT*/;
-        std::unique_lock<std::mutex> lk(g_q_mx);
-        g_q_cv.wait_for(lk, std::chrono::milliseconds(100));
+        // Poll instead of a timed condition-variable wait: the PS4 process died ~3 ms after the
+        // raw-input thread first blocked here, and this rules the timed wait in or out.
+        static thread_local unsigned waits = 0;
+        if (waits < 3) log("desktop: GetMessageA idle wait %u begin\n", waits);
+        plat::sleep_ms(5);
+        if (waits < 3) log("desktop: GetMessageA idle wait %u end\n", waits);
+        waits++;
     }
 }
 MSABI LRESULT DispatchMessageW(const MSG* m) { return call_proc(win(m->hwnd), m->message, m->wParam, m->lParam); }
