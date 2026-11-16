@@ -269,8 +269,54 @@ static void* native_lookup(const std::string& dll, const std::string& sym) {
     return nullptr;
 }
 
+// ---- API call trace for game threads other than the main one ------------------------------
+// Every import the runner itself implements (win32/desktop/native) is wrapped in a small thunk
+// that logs "call dll!sym" (first 400 calls per thread, main thread excluded), then jumps on.
+static uint32_t g_main_tid;
+MSABI static void trace_hit(const char* name) {
+    static thread_local unsigned n = 0;
+    uint32_t tid = (uint32_t)scePthreadGetthreadid();
+    if (tid == g_main_tid || n >= 400) return;
+    n++;
+    logf("call %s\n", name);
+}
+static void* trace_wrap(void* target, const std::string& name) {
+    if (!target) return target;
+    static uint8_t* pool = nullptr; static size_t used = 0, cap = 0;
+    static std::mutex mx; std::lock_guard<std::mutex> l(mx);
+    if (used + 128 > cap) { cap = 0x40000; pool = (uint8_t*)plat::vm_reserve(cap, true, 7); used = 0; if (!pool) return target; }
+    uint8_t* c = pool + used; uint8_t* p = c;
+    auto b = [&](std::initializer_list<uint8_t> v) { for (uint8_t x : v) *p++ = x; };
+    auto q = [&](uint64_t v) { memcpy(p, &v, 8); p += 8; };
+    b({0x51, 0x52, 0x41, 0x50, 0x41, 0x51});            // push rcx, rdx, r8, r9
+    b({0x48, 0x83, 0xEC, 0x68});                        // sub rsp, 0x68 (16-aligned, shadow + xmm saves)
+    b({0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x20});            // movdqu [rsp+0x20], xmm0
+    b({0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x30});            // movdqu [rsp+0x30], xmm1
+    b({0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x40});            // movdqu [rsp+0x40], xmm2
+    b({0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x50});            // movdqu [rsp+0x50], xmm3
+    b({0x48, 0xB9}); q((uint64_t)strdup(name.c_str())); // mov rcx, name
+    b({0x48, 0xB8}); q((uint64_t)&trace_hit);           // mov rax, trace_hit
+    b({0xFF, 0xD0});                                    // call rax
+    b({0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x20});            // movdqu xmm0, [rsp+0x20]
+    b({0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x30});
+    b({0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x40});
+    b({0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x50});
+    b({0x48, 0x83, 0xC4, 0x68});                        // add rsp, 0x68
+    b({0x41, 0x59, 0x41, 0x58, 0x5A, 0x59});            // pop r9, r8, rdx, rcx
+    b({0x48, 0xB8}); q((uint64_t)target);               // mov rax, target
+    b({0xFF, 0xE0});                                    // jmp rax
+    used += (size_t)(p - c + 15) & ~(size_t)15;
+    return c;
+}
+
 static bool load_image(const std::string& name);
 static void* resolve(const std::string& dll, const std::string& sym);
+static void* resolve_raw(const std::string& dll_in, const std::string& sym);
+static void* resolve(const std::string& dll_in, const std::string& sym) {
+    void* p = resolve_raw(dll_in, sym);
+    if (in_pe_set(canon_dll(dll_in))) return p;
+    return trace_wrap(p, canon_dll(dll_in) + "!" + sym);
+}
 static void* resolve_in_image(const std::string& name, const std::string& sym) {
     auto& img = g_loaded[name];
     std::string fwd = img.forwarder(sym);
@@ -278,7 +324,7 @@ static void* resolve_in_image(const std::string& name, const std::string& sym) {
     auto dot = fwd.find('.');
     return resolve(fwd.substr(0, dot) + ".dll", fwd.substr(dot + 1));
 }
-static void* resolve(const std::string& dll_in, const std::string& sym) {
+static void* resolve_raw(const std::string& dll_in, const std::string& sym) {
     std::string dll = canon_dll(dll_in);
     if (in_pe_set(dll)) {
         if (!load_image(dll)) return make_stub(dll + "!" + sym);
@@ -394,6 +440,7 @@ int main() {
 #ifndef GDPS4_BUILD
 #define GDPS4_BUILD "dev"
 #endif
+    g_main_tid = (uint32_t)scePthreadGetthreadid();
     logf("gdps4 runner, build %s\n", GDPS4_BUILD);
     logf("runner: on_kernel_exception at %p (resolve runner addresses against runner.elf)\n", (void*)&on_kernel_exception);   // check this matches the PKG you installed
     notify("gdps4: starting Geometry Dash...");
