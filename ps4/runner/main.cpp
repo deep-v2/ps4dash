@@ -35,12 +35,13 @@ static const char* kRoot = "/data/gdps4";
 static const char* kGameDir = "/data/gdps4/game";
 static FILE* g_log;
 static std::mutex g_log_mx;
+static uint64_t g_t0 = plat::monotonic_ns();
 
 static void logf(const char* fmt, ...) {
     char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
     std::lock_guard<std::mutex> l(g_log_mx);
     printf("[gdps4] %s", b);
-    if (g_log) { fprintf(g_log, "[t%u] %s", (unsigned)scePthreadGetthreadid(), b); fflush(g_log); }
+    if (g_log) { fprintf(g_log, "[%7.3f t%u] %s", (double)(plat::monotonic_ns() - g_t0) / 1e9, (unsigned)scePthreadGetthreadid(), b); fflush(g_log); }
 }
 static void notify(const char* msg) {
     OrbisNotificationRequest req; memset(&req, 0, sizeof req);
@@ -396,6 +397,15 @@ int main() {
     logf("gdps4 runner, build %s\n", GDPS4_BUILD);
     logf("runner: on_kernel_exception at %p (resolve runner addresses against runner.elf)\n", (void*)&on_kernel_exception);   // check this matches the PKG you installed
     notify("gdps4: starting Geometry Dash...");
+    // Heartbeat: if these lines stop together with the main thread, the whole process was killed
+    // from outside; if they keep going, only a game thread is stuck or gone.
+    plat::start_thread([] {
+        for (unsigned n = 1;; n++) {
+            size_t flex = 0; ((int32_t (*)(size_t*))&sceKernelAvailableFlexibleMemorySize)(&flex);
+            logf("heartbeat %u: flexible memory free %zu MB""\n", n, flex >> 20);
+            sceKernelUsleep(250000);
+        }
+    }, 0x40000);
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.__sa_handler.__sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;   // OpenOrbis' sa_sigaction macro is broken
     sigaction(SIGSEGV, &sa, nullptr); sigaction(SIGBUS, &sa, nullptr); sigaction(SIGILL, &sa, nullptr);
