@@ -99,8 +99,12 @@ std::vector<std::string> list_dir(const std::string& path) {
 int last_errno() { return errno; }
 
 uint64_t monotonic_ns() {
-    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    // Not clock_gettime(CLOCK_MONOTONIC): OpenOrbis' time.h uses Linux's value (1), which on the
+    // PS4's FreeBSD kernel is CLOCK_VIRTUAL, the process's CPU time. With several busy threads it
+    // ran ~4x faster than wall time and the game ran like a speedhack. The TSC is wall time.
+    static const uint64_t freq = sceKernelGetTscFrequency();
+    uint64_t t = sceKernelReadTsc();
+    return (uint64_t)((unsigned __int128)t * 1000000000ull / freq);
 }
 int64_t realtime_unix_ns() {
     timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
