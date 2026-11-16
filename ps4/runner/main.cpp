@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -245,6 +246,20 @@ MSABI static uint32_t XInputGetState(uint32_t index, XINPUT_STATE* st) {
     st->lx = stick_axis(d.leftStick.x, false); st->ly = stick_axis(d.leftStick.y, true);
     st->rx = stick_axis(d.rightStick.x, false); st->ry = stick_axis(d.rightStick.y, true);
     return 0;
+}
+
+// Virtual mouse: left stick moves the cursor (speed grows with deflection), Cross is the left
+// button. Polled once per presented frame; GD still sees the pad through XInput as well.
+static void pad_mouse_frame() {
+    pad_open();
+    OrbisPadData d; memset(&d, 0, sizeof d);
+    if (g_pad < 0 || scePadReadState(g_pad, &d) != 0 || !d.connected) return;
+    static uint64_t last = 0; uint64_t now = plat::monotonic_ns();
+    float dt = last ? std::min((now - last) / 1e9f, 0.1f) : 0.f; last = now;
+    auto axis = [](uint8_t v) { float f = ((int)v - 128) / 127.f; float dz = 0.18f;
+        if (std::fabs(f) < dz) return 0.f; f = (std::fabs(f) - dz) / (1 - dz) * (f < 0 ? -1.f : 1.f); return f * std::fabs(f); };
+    const float speed = 900.f;   // px/s at full deflection
+    desktop::mouse_input(axis(d.leftStick.x) * speed * dt, axis(d.leftStick.y) * speed * dt, d.buttons & ORBIS_PAD_BUTTON_CROSS);
 }
 
 // LoadLibrary/GetModuleHandle of DLLs the Win32 layer implements (kernel32, apisets, ...):
@@ -519,6 +534,8 @@ int main() {
     gditext::init(th);
     gl::Hooks gh; gh.log = [](const char* m) { logf("%s", m); }; gh.make_stub = [](const std::string& n) { return make_stub(n); };
     gh.fatal = [](const char* why) { halt(why); };
+    gh.on_frame = pad_mouse_frame;
+    gh.cursor = desktop::cursor_pos;
     gl::init(gh);
     fmod::Hooks fh; fh.log = [](const char* m) { logf("%s", m); };
     fh.map_path = [](const std::string& p) {   // FMOD gets the game's paths: absolute (C:\GD\...) or relative to it

@@ -10,4 +10,8 @@ struct Hooks {
 };
 void init(const Hooks& h);
 void* lookup(const std::string& dll, const std::string& sym);   // user32.dll / gdi32.dll export or nullptr
+// Controller-driven mouse: moves the cursor by (dx, dy) pixels and posts WM_MOUSEMOVE /
+// WM_LBUTTONDOWN / WM_LBUTTONUP to the focused window like real mouse input.
+void mouse_input(float dx, float dy, bool left_down);
+bool cursor_pos(int* x, int* y);   // false until the virtual mouse has been used
 }  // namespace gdps4::desktop

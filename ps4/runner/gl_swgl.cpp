@@ -160,6 +160,18 @@ void* lookup(const std::string& sym) {
     }
     return nullptr;
 }
+// 12x19 arrow, drawn into the scanout buffer (BGRA): '#' black outline, '.' white fill.
+static void draw_cursor(uint32_t* dst, int w, int h, int cx, int cy) {
+    static const char* kArrow[] = {
+        "#", "##", "#.#", "#..#", "#...#", "#....#", "#.....#", "#......#", "#.......#", "#........#",
+        "#.........#", "#..........#", "#......#####", "#...#..#", "#..##..#", "#.#  #..#", "##   #..#", "#     #..#", "      ###"};
+    for (int y = 0; y < 19; y++)
+        for (int x = 0; kArrow[y][x]; x++) {
+            char c = kArrow[y][x]; if (c == ' ') continue;
+            int px = cx + x, py = cy + y; if (px < 0 || py < 0 || px >= w || py >= h) continue;
+            dst[(size_t)py * w + px] = c == '#' ? 0xFF000000u : 0xFFFFFFFFu;
+        }
+}
 bool swap_buffers() {
     static int n = 0; bool trace = n++ < 3;
     if (trace) log("gl: SwapBuffers #%d begin\n", n);
@@ -175,6 +187,9 @@ bool swap_buffers() {
         uint32_t* d = dst + (size_t)y * w;
         for (int x = 0; x < w; x++) { uint32_t c = s[x]; d[x] = (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); }
     }
+    if (g_h.on_frame) g_h.on_frame();
+    int cx, cy;
+    if (g_h.cursor && g_h.cursor(&cx, &cy)) draw_cursor(dst, w, h, cx, cy);
     sceVideoOutSubmitFlip(g_video, g_back, ORBIS_VIDEO_OUT_FLIP_VSYNC, ++g_frame);
     if (trace) log("gl: SwapBuffers #%d flipped\n", n);
     g_back ^= 1;

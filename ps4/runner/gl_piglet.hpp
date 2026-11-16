@@ -9,6 +9,8 @@ struct Hooks {
     // Creates a stub that stops the run and reports `name` if called (runner's make_stub).
     std::function<void*(const std::string& name)> make_stub;
     void (*fatal)(const char* why) = nullptr;   // stops the run with a message (runner's halt)
+    void (*on_frame)() = nullptr;               // once per SwapBuffers, before presenting (input polling)
+    bool (*cursor)(int* x, int* y) = nullptr;   // cursor to draw over the frame, if any
 };
 void init(const Hooks& h);
 bool early_init();   // call at process start, before game code (Piglet bring-up + diagnostics)

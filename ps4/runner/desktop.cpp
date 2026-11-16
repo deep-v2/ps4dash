@@ -428,6 +428,35 @@ const std::map<std::string, void*>& dwmapi() {
     return m;
 }
 #undef E
+// ---- virtual mouse (controller-driven) -----------------------------------------------------------
+std::mutex g_mouse_mx;
+bool g_mouse_down, g_mouse_init;
+}  // namespace
+
+void mouse_input(float dx, float dy, bool down) {
+    POINT pos; bool moved, changed;
+    {
+        std::lock_guard<std::mutex> l(g_mouse_mx);
+        if (!g_mouse_init) { g_cursor = {W() / 2, H() / 2}; g_mouse_init = true; }
+        static float fx = 0, fy = 0;   // sub-pixel remainder
+        fx += dx; fy += dy;
+        int ix = (int)fx, iy = (int)fy; fx -= ix; fy -= iy;
+        POINT np{std::max(0, std::min(W() - 1, (int)g_cursor.x + ix)), std::max(0, std::min(H() - 1, (int)g_cursor.y + iy))};
+        moved = np.x != g_cursor.x || np.y != g_cursor.y; g_cursor = np; pos = np;
+        changed = down != g_mouse_down; g_mouse_down = down;
+    }
+    HWND h = g_capture ? g_capture : g_focus ? g_focus : g_active;
+    Window* w = win(h); if (!w) return;
+    LPARAM lp = ((LPARAM)(pos.y & 0xFFFF) << 16) | (pos.x & 0xFFFF);
+    if (moved) post_to_thread(w->thread, h, 0x0200 /*WM_MOUSEMOVE*/, down ? 1 : 0, lp);
+    if (changed) post_to_thread(w->thread, h, down ? 0x0201 /*WM_LBUTTONDOWN*/ : 0x0202 /*WM_LBUTTONUP*/, down ? 1 : 0, lp);
+}
+bool cursor_pos(int* x, int* y) {
+    std::lock_guard<std::mutex> l(g_mouse_mx);
+    if (!g_mouse_init) return false;
+    *x = g_cursor.x; *y = g_cursor.y; return true;
+}
+namespace {
 }  // namespace
 
 void init(const Hooks& h) { g_h = h; }
