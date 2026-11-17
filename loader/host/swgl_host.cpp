@@ -60,11 +60,21 @@ MSABI BOOL SwapBuffers(HDC dc) {
     static double render_ms_acc = 0;   // time between the previous present's end and this call = game + swgl rendering
     static auto prev_end = std::chrono::steady_clock::now();
     render_ms_acc += std::chrono::duration<double, std::milli>(t0 - prev_end).count();
+    static double draw_ms_acc = 0, clear_ms_acc = 0;
+    swgl::FrameStats fs = swgl::take_frame_stats();
+    draw_ms_acc += fs.draw_ns / 1e6; clear_ms_acc += fs.clear_ns / 1e6;
+    static uint64_t px_fast = 0, px_slow[32] = {};
+    px_fast += fs.px_fast; for (int i = 0; i < 32; i++) px_slow[i] += fs.px_slow[i];
     if (++calls % 20 == 0) {
         double span = std::chrono::duration<double, std::milli>(t0 - window_start).count();
-        log("swgl: frames %d-%d: %.1f fps, avg render %.1f ms/frame at %dx%d\n", calls - 19, calls, 20000.0 / span,
-            render_ms_acc / 20, w, h);
-        window_start = t0; render_ms_acc = 0;
+        char slow[256] = ""; size_t n = 0;
+        for (int i = 0; i < 32; i++)
+            if (px_slow[i]) n += snprintf(slow + n, sizeof slow - n, " why%d=%llu", i, (unsigned long long)(px_slow[i] / 20));
+        log("swgl: frames %d-%d: %.1f fps, avg render %.1f ms/frame (draw %.2f, clear %.2f) at %dx%d | px/frame fast=%llu slow:%s\n",
+            calls - 19, calls, 20000.0 / span, render_ms_acc / 20, draw_ms_acc / 20, clear_ms_acc / 20, w, h,
+            (unsigned long long)(px_fast / 20), slow);
+        window_start = t0; render_ms_acc = 0; draw_ms_acc = 0; clear_ms_acc = 0;
+        px_fast = 0; for (auto& v : px_slow) v = 0;
     }
     if (!px || !w || !h) return TRUE;
     g_bgra.resize((size_t)w * h);
@@ -124,6 +134,9 @@ MSABI void* wglGetProcAddress(const char* name) {
 void init(void (*log_fn)(const char*), void* (*missing)(const std::string&)) {
     g_log = log_fn; g_missing = missing;
     swgl::set_log(log_fn);
+    swgl::set_clock([]() -> uint64_t {
+        return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    });
 }
 void* lookup_gl(const std::string& sym) {
     if (sym.rfind("gl", 0) == 0 && sym != "glClearDepth" && sym != "glDepthRange" && !table().count(sym))

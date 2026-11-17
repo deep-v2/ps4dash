@@ -500,11 +500,17 @@ inline uint32_t blend_i(uint32_t s, uint32_t d) {
 struct Plane { float dx, dy, c; float at(float x, float y) const { return dx * x + dy * y + c; } };
 
 // Integer fast path: is this draw eligible?
-struct Fast { bool ok = false; FKind kind = FKind::Unknown; const Texture* tex = nullptr; uint32_t ucolor[4] = {255, 255, 255, 255}; };
+struct Fast;
+struct Plane;
+using SpanFn = void (*)(const Fast&, const Target&, int, int, int, const Plane*, float, float);
+struct Fast { int why = 0; bool ok = false; FKind kind = FKind::Unknown; const Texture* tex = nullptr; uint32_t ucolor[4] = {255, 255, 255, 255}; };
 Fast fast_path(const Program& p, const Target& t, bool affine) {
     Fast f;
-    if (!affine || (g_stencil && t.stencil) || (g_depth && t.depth)) return f;
-    if (!(g_color_mask[0] && g_color_mask[1] && g_color_mask[2] && g_color_mask[3])) return f;
+    if (!affine) { f.why = 1; return f; }
+    if (g_stencil && t.stencil) { f.why = 2; return f; }
+    if (g_depth && t.depth) { f.why = 3; return f; }
+    if (!(g_color_mask[0] && g_color_mask[1] && g_color_mask[2] && g_color_mask[3])) { f.why = 4; return f; }
+    f.why = 5;
     if (g_blend && (g_blend_eq_rgb != E_FUNC_ADD || g_blend_eq_a != E_FUNC_ADD || !int_blend_ok(g_blend_src_rgb) ||
                     !int_blend_ok(g_blend_dst_rgb) || !int_blend_ok(g_blend_src_a) || !int_blend_ok(g_blend_dst_a))) return f;
     switch (p.fs) {
@@ -512,10 +518,10 @@ Fast fast_path(const Program& p, const Target& t, bool affine) {
     case FKind::Tex: case FKind::TexColor: case FKind::TexUColor: case FKind::TexAlphaOnly: {
         int unit = p.u_tex0 >= 0 ? p.uniforms[p.u_tex0].iv : 0;
         f.tex = bound_texture(unit);
-        if (!f.tex || f.tex->w == 0 || f.tex->px.empty()) return f;   // incomplete texture: generic path
+        if (!f.tex || f.tex->w == 0 || f.tex->px.empty()) { f.why = 7; return f; }   // incomplete texture: generic path
         break;
     }
-    default: return f;
+    default: f.why = 8 + (int)p.fs; return f;
     }
     if (p.fs == FKind::TexUColor && p.u_color >= 0)
         for (int k = 0; k < 4; k++) f.ucolor[k] = (uint32_t)(std::min(std::max(p.uniforms[p.u_color].v[k], 0.f), 1.f) * 255.f + 0.5f);
@@ -524,50 +530,114 @@ Fast fast_path(const Program& p, const Target& t, bool affine) {
 }
 inline uint32_t to8(float v) { return v <= 0 ? 0 : v >= 1 ? 255 : (uint32_t)(v * 255.f + 0.5f); }
 
-void fast_span(const Fast& f, const Target& t, int y, int x0, int x1, const Plane* pl, float px0, float py) {
+// Blend modes with a dedicated integer path; everything else integer-capable goes through blend_i.
+enum BMode { BM_NONE, BM_PREMUL, BM_STRAIGHT, BM_ADD, BM_OTHER };
+BMode blend_mode() {
+    if (!g_blend) return BM_NONE;
+    GLenum sr = g_blend_src_rgb, dr = g_blend_dst_rgb, sa = g_blend_src_a, da = g_blend_dst_a;
+    if (sr == E_ONE && dr == E_ONE_MINUS_SRC_ALPHA && sa == E_ONE && da == E_ONE_MINUS_SRC_ALPHA) return BM_PREMUL;
+    if (sr == E_SRC_ALPHA && dr == E_ONE_MINUS_SRC_ALPHA && sa == E_SRC_ALPHA && da == E_ONE_MINUS_SRC_ALPHA) return BM_STRAIGHT;
+    if (sr == E_SRC_ALPHA && dr == E_ONE && sa == E_SRC_ALPHA && da == E_ONE) return BM_ADD;
+    return BM_OTHER;
+}
+// Same arithmetic as blend_i's branches (blend_i still serves BM_OTHER and checks the modes itself).
+template <BMode B> inline uint32_t blend_t(uint32_t s, uint32_t d) {
+    if constexpr (B == BM_NONE) return s;
+    else if constexpr (B == BM_OTHER) return blend_i(s, d);
+    else if constexpr (B == BM_PREMUL) {
+        uint32_t ia = 255 - (s >> 24);
+        if (ia == 0) return s;
+        if (ia == 255 && s == 0) return d;
+        uint32_t dd = scale32(d, ia);
+        uint32_t rb = (s & 0x00FF00FFu) + (dd & 0x00FF00FFu), ag = ((s >> 8) & 0x00FF00FFu) + ((dd >> 8) & 0x00FF00FFu);
+        rb |= ((rb >> 8) & 0x00010001u) * 255; ag |= ((ag >> 8) & 0x00010001u) * 255;
+        return (rb & 0x00FF00FFu) | ((ag & 0x00FF00FFu) << 8);
+    } else if constexpr (B == BM_STRAIGHT) {
+        uint32_t sa = s >> 24;
+        if (sa == 0) return d;
+        if (sa == 255) return s;
+        uint32_t f = sa + (sa >> 7);
+        uint32_t rb = (((s & 0x00FF00FFu) * f + (d & 0x00FF00FFu) * (256 - f)) >> 8) & 0x00FF00FFu;
+        uint32_t ag = (((s >> 8) & 0x00FF00FFu) * f + ((d >> 8) & 0x00FF00FFu) * (256 - f)) & 0xFF00FF00u;
+        uint32_t a = mul8(sa, sa) + mul8(d >> 24, 255 - sa);
+        return ((rb | ag) & 0x00FFFFFFu) | ((a > 255 ? 255 : a) << 24);
+    } else {   // BM_ADD
+        uint32_t ss = scale32(s, s >> 24);
+        if (ss == 0) return d;
+        uint32_t rb = (ss & 0x00FF00FFu) + (d & 0x00FF00FFu), ag = ((ss >> 8) & 0x00FF00FFu) + ((d >> 8) & 0x00FF00FFu);
+        rb |= ((rb >> 8) & 0x00010001u) * 255; ag |= ((ag >> 8) & 0x00010001u) * 255;
+        return (rb & 0x00FF00FFu) | ((ag & 0x00FF00FFu) << 8);
+    }
+}
+// One span, specialized on shader kind, blend mode, filtering and constant vertex color so the
+// per-pixel loop has no mode branches. Same arithmetic as the former generic fast span.
+template <FKind K, BMode B, bool BIL, bool CONST>
+void span_t(const Fast& f, const Target& t, int y, int x0, int x1, const Plane* pl, float px0, float py) {
     uint32_t* row = t.color + (size_t)y * t.w;
+    constexpr bool TEX = K != FKind::Color;
     float c[4], dc[4];
     for (int k = 0; k < 4; k++) { c[k] = pl[k].at(px0, py); dc[k] = pl[k].dx; }
-    // Texture coordinates stepped in fixed point (texels * 256, bilinear-centered) - no float->int per pixel.
-    bool tex = f.tex != nullptr, bilinear = tex && f.tex->mag_filter != E_NEAREST;
     float fu = 0, fv = 0, fdu = 0, fdv = 0;
-    if (tex) {
+    if constexpr (TEX) {
         float sw = f.tex->w * 256.f, sh = f.tex->h * 256.f;
-        fu = pl[4].at(px0, py) * sw - (bilinear ? 128.f : 0.f); fv = pl[5].at(px0, py) * sh - (bilinear ? 128.f : 0.f);
+        fu = pl[4].at(px0, py) * sw - (BIL ? 128.f : 0.f); fv = pl[5].at(px0, py) * sh - (BIL ? 128.f : 0.f);
         fdu = pl[4].dx * sw; fdv = pl[5].dx * sh;
     }
-    // Vertex color constant across the span? (sprites: always) -> convert once.
-    bool const_color = dc[0] == 0 && dc[1] == 0 && dc[2] == 0 && dc[3] == 0;
     uint32_t m[4] = {to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])};
     bool white = m[0] == 255 && m[1] == 255 && m[2] == 255 && m[3] == 255;
-    const bool blend = g_blend;
+    const uint32_t mpacked = m[0] | (m[1] << 8) | (m[2] << 16) | (m[3] << 24);
+    const Texture* tx = f.tex;
     for (int x = x0; x <= x1; x++) {
-        if (!const_color) { m[0] = to8(c[0]); m[1] = to8(c[1]); m[2] = to8(c[2]); m[3] = to8(c[3]); white = (m[0] & m[1] & m[2] & m[3]) == 255; }
-        uint32_t src;
+        if constexpr (!CONST) { m[0] = to8(c[0]); m[1] = to8(c[1]); m[2] = to8(c[2]); m[3] = to8(c[3]); white = (m[0] & m[1] & m[2] & m[3]) == 255; }
         uint32_t texel = 0;
-        if (tex) {
-            if (bilinear) texel = sample_fx(f.tex, ifloor(fu), ifloor(fv));
+        if constexpr (TEX) {
+            if constexpr (BIL) texel = sample_fx(tx, ifloor(fu), ifloor(fv));
             else {
-                int tx = wrapi(ifloor(fu) >> 8, f.tex->w, f.tex->wrap_s), ty = wrapi(ifloor(fv) >> 8, f.tex->h, f.tex->wrap_t);
-                texel = f.tex->px[(size_t)ty * f.tex->w + tx];
+                int u = wrapi(ifloor(fu) >> 8, tx->w, tx->wrap_s), v = wrapi(ifloor(fv) >> 8, tx->h, tx->wrap_t);
+                texel = tx->px[(size_t)v * tx->w + u];
             }
         }
-        switch (f.kind) {
-        case FKind::Color: src = m[0] | (m[1] << 8) | (m[2] << 16) | (m[3] << 24); break;
-        case FKind::Tex: src = texel; break;
-        case FKind::TexUColor: src = modulate(texel, f.ucolor); break;
-        case FKind::TexAlphaOnly: src = m[0] | (m[1] << 8) | (m[2] << 16) | (mul8(m[3], texel >> 24) << 24); break;
-        default: src = white ? texel : modulate(texel, m); break;   // TexColor
-        }
-        if (!blend) row[x] = src;
-        else if (src != 0 || g_blend_dst_rgb != E_ONE_MINUS_SRC_ALPHA || g_blend_dst_a != E_ONE_MINUS_SRC_ALPHA)
-            row[x] = blend_i(src, row[x]);   // (a fully transparent texel leaves the destination unchanged)
-        if (!const_color) for (int k = 0; k < 4; k++) c[k] += dc[k];
-        fu += fdu; fv += fdv;
+        uint32_t src;
+        if constexpr (K == FKind::Color) src = CONST ? mpacked : (m[0] | (m[1] << 8) | (m[2] << 16) | (m[3] << 24));
+        else if constexpr (K == FKind::Tex) src = texel;
+        else if constexpr (K == FKind::TexUColor) src = modulate(texel, f.ucolor);
+        else if constexpr (K == FKind::TexAlphaOnly) src = m[0] | (m[1] << 8) | (m[2] << 16) | (mul8(m[3], texel >> 24) << 24);
+        else src = white ? texel : modulate(texel, m);   // TexColor
+        if constexpr (B == BM_NONE) row[x] = src;
+        else if constexpr (B == BM_OTHER) {
+            if (src != 0 || g_blend_dst_rgb != E_ONE_MINUS_SRC_ALPHA || g_blend_dst_a != E_ONE_MINUS_SRC_ALPHA) row[x] = blend_i(src, row[x]);
+        } else row[x] = blend_t<B>(src, row[x]);
+        if constexpr (!CONST) for (int k = 0; k < 4; k++) c[k] += dc[k];
+        if constexpr (TEX) { fu += fdu; fv += fdv; }
+    }
+}
+template <FKind K, BMode B> SpanFn pick3(bool bil, bool cst) {
+    if (bil) return cst ? &span_t<K, B, true, true> : &span_t<K, B, true, false>;
+    return cst ? &span_t<K, B, false, true> : &span_t<K, B, false, false>;
+}
+template <FKind K> SpanFn pick2(BMode b, bool bil, bool cst) {
+    switch (b) {
+    case BM_NONE: return pick3<K, BM_NONE>(bil, cst);
+    case BM_PREMUL: return pick3<K, BM_PREMUL>(bil, cst);
+    case BM_STRAIGHT: return pick3<K, BM_STRAIGHT>(bil, cst);
+    case BM_ADD: return pick3<K, BM_ADD>(bil, cst);
+    default: return pick3<K, BM_OTHER>(bil, cst);
+    }
+}
+SpanFn pick_span(const Fast& f, bool const_color) {
+    BMode b = blend_mode();
+    bool bil = f.tex && f.tex->mag_filter != E_NEAREST;
+    switch (f.kind) {
+    case FKind::Color: return pick2<FKind::Color>(b, false, const_color);
+    case FKind::Tex: return pick2<FKind::Tex>(b, bil, const_color);
+    case FKind::TexUColor: return pick2<FKind::TexUColor>(b, bil, const_color);
+    case FKind::TexAlphaOnly: return pick2<FKind::TexAlphaOnly>(b, bil, const_color);
+    default: return pick2<FKind::TexColor>(b, bil, const_color);
     }
 }
 
-void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const V& v2, int band_y0, int band_y1) {
+std::atomic<uint64_t> g_px_fast, g_px_slow[32];
+void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const V& v2, int band, int nbands) {
     if (v0.w <= 0 || v1.w <= 0 || v2.w <= 0) return;   // behind the eye: 2D content never is
     SV s[3]; to_screen(v0, s[0]); to_screen(v1, s[1]); to_screen(v2, s[2]);
     float area = (s[1].x - s[0].x) * (s[2].y - s[0].y) - (s[2].x - s[0].x) * (s[1].y - s[0].y);
@@ -584,7 +654,6 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
         minx = std::max(minx, g_scissor_box[0]); miny = std::max(miny, g_scissor_box[1]);
         maxx = std::min(maxx, g_scissor_box[0] + g_scissor_box[2] - 1); maxy = std::min(maxy, g_scissor_box[1] + g_scissor_box[3] - 1);
     }
-    miny = std::max(miny, band_y0); maxy = std::min(maxy, band_y1 - 1);   // this worker's rows only
     if (minx > maxx || miny > maxy) return;
 
     // Edge i is opposite vertex i: E_i(x,y) = A_i x + B_i y + C_i, >= 0 inside (CCW, y up).
@@ -606,8 +675,13 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
     bool affine = std::fabs(s[0].iw - s[1].iw) < 1e-6f && std::fabs(s[0].iw - s[2].iw) < 1e-6f;
     if (affine && s[0].iw != 1.0f) for (int k = 0; k < kVar; k++) { pl[k].dx /= s[0].iw; pl[k].dy /= s[0].iw; pl[k].c /= s[0].iw; }
     Fast fp = fast_path(p, t, affine);
+    SpanFn span = nullptr;
+    if (fp.ok) span = pick_span(fp, pl[0].dx == 0 && pl[1].dx == 0 && pl[2].dx == 0 && pl[3].dx == 0);
 
     for (int y = miny; y <= maxy; y++) {
+        // Rows go to the render threads in interleaved 8-row blocks (load balance: a busy strip
+        // of the screen no longer lands on a single thread).
+        if (nbands > 1 && ((y >> 3) % nbands) != band) { y |= 7; continue; }
         float py = y + 0.5f;
         // Solve each edge for the covered x range on this row (pixel centers at x + 0.5).
         int xs = minx, xe = maxx;
@@ -624,7 +698,8 @@ void triangle(const Program& p, const Target& t, const V& v0, const V& v1, const
             } else if (rowc < 0 || (rowc == 0 && !tl[i])) xs = xe + 1;   // horizontal edge: row fully in or out
         }
         if (xs > xe) continue;
-        if (fp.ok) { fast_span(fp, t, y, xs, xe, pl, xs + 0.5f, py); continue; }
+        if (span) { g_px_fast.fetch_add(xe - xs + 1, std::memory_order_relaxed); span(fp, t, y, xs, xe, pl, xs + 0.5f, py); continue; }
+        g_px_slow[std::min(fp.why, 31)].fetch_add(xe - xs + 1, std::memory_order_relaxed);
         // Generic path: exact float shading, stencil/depth, any blend mode, perspective-correct.
         for (int x = xs; x <= xe; x++) {
             float px = x + 0.5f;
@@ -750,9 +825,7 @@ void draw(GLenum mode, int count, const std::function<int(int)>& index) {
     int ry0 = std::max(0, (int)std::floor(miny)), ry1 = std::min(t.h, (int)std::ceil(maxy) + 1);
     if (ry0 >= ry1) return;
     auto raster = [&](int band, int nbands) {
-        int rows = ry1 - ry0;
-        int b0 = ry0 + rows * band / nbands, b1 = ry0 + rows * (band + 1) / nbands;
-        for (size_t i = 0; i + 2 < tri.size(); i += 3) triangle(*p, t, tri[i], tri[i + 1], tri[i + 2], b0, b1);
+        for (size_t i = 0; i + 2 < tri.size(); i += 3) triangle(*p, t, tri[i], tri[i + 1], tri[i + 2], band, nbands);
     };
     if (work < 16384 || ry1 - ry0 < 32) raster(0, 1);   // small draw: threads would cost more than they save
     else g_pool.run(raster);
@@ -1164,12 +1237,18 @@ void glClear(GLbitfield mask) { crumb("glClear"); StatTimer st_(&g_stat_clear_ns
         cc |= (uint32_t)(v * 255 + 0.5f) << (8 * k);
         if (g_color_mask[k]) cmask |= 0xFFu << (8 * k);
     }
-    for (int y = y0; y < y1; y++) {
-        size_t row = (size_t)y * t.w;
-        if (mask & E_COLOR_BUFFER_BIT) for (int x = x0; x < x1; x++) t.color[row + x] = (t.color[row + x] & ~cmask) | (cc & cmask);
-        if ((mask & E_STENCIL_BUFFER_BIT) && t.stencil) for (int x = x0; x < x1; x++) write_stencil(&t.stencil[row + x], (uint8_t)g_clear_stencil);
-        if ((mask & E_DEPTH_BUFFER_BIT) && t.depth && g_depth_mask) for (int x = x0; x < x1; x++) t.depth[row + x] = g_clear_depth;
-    }
+    auto rows = [&](int band, int nbands) {
+        for (int y = y0 + band; y < y1; y += nbands) {
+            size_t row = (size_t)y * t.w;
+            if (mask & E_COLOR_BUFFER_BIT) {
+                if (cmask == 0xFFFFFFFFu) std::fill(t.color + row + x0, t.color + row + x1, cc);
+                else for (int x = x0; x < x1; x++) t.color[row + x] = (t.color[row + x] & ~cmask) | (cc & cmask);
+            }
+            if ((mask & E_STENCIL_BUFFER_BIT) && t.stencil) for (int x = x0; x < x1; x++) write_stencil(&t.stencil[row + x], (uint8_t)g_clear_stencil);
+            if ((mask & E_DEPTH_BUFFER_BIT) && t.depth && g_depth_mask) std::fill(t.depth + row + x0, t.depth + row + x1, g_clear_depth);
+        }
+    };
+    if ((int64_t)(x1 - x0) * (y1 - y0) < 65536) rows(0, 1); else g_pool.run(rows);
 }
 void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void* pixels) {
     Target t = target(); if (!t.color || format != E_RGBA || type != E_UNSIGNED_BYTE) { set_error(E_INVALID_OPERATION); return; }
@@ -1267,7 +1346,16 @@ namespace swgl {
 void set_clock(uint64_t (*ns)()) { g_clock_ns = ns; }
 FrameStats take_frame_stats() {
     FrameStats f{g_stat_draw_ns, g_stat_clear_ns, g_stat_upload_ns, g_stat_draws, g_stat_verts};
+    f.px_fast = g_px_fast.exchange(0);
+    for (int i = 0; i < 32; i++) f.px_slow[i] = g_px_slow[i].exchange(0);
     g_stat_draw_ns = g_stat_clear_ns = g_stat_upload_ns = 0; g_stat_draws = g_stat_verts = 0;
     return f;
+}
+}  // namespace swgl
+
+namespace swgl {
+void parallel_rows(int rows, const std::function<void(int, int)>& fn) {
+    if (rows < 64) { fn(0, 1); return; }
+    g_pool.run(fn);
 }
 }  // namespace swgl

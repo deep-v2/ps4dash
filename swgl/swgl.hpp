@@ -4,6 +4,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace swgl {
 
@@ -20,9 +21,17 @@ void set_default_framebuffer_size(int w, int h);   // window / screen size (allo
 const uint32_t* default_framebuffer(int* w, int* h);
 // Cost accounting: time spent in draws, clears and texture uploads since the last take (needs a
 // clock: on PS4 std::chrono::steady_clock is wrong, see platform_posix.cpp monotonic_ns).
-struct FrameStats { uint64_t draw_ns, clear_ns, upload_ns; int draws, verts; };
+struct FrameStats {
+    uint64_t draw_ns, clear_ns, upload_ns; int draws, verts;
+    // Pixels by path: integer fast path, and the float path by reason (1 perspective, 2 stencil,
+    // 3 depth, 4 color mask, 5 blend mode, 7 incomplete texture, 8+ shader kind).
+    uint64_t px_fast = 0, px_slow[32] = {};
+};
 void set_clock(uint64_t (*ns)());
 FrameStats take_frame_stats();
+// Runs fn(band, nbands) on all render threads and waits (presentation work such as format
+// conversion). fn must only touch rows y with y % nbands == band.
+void parallel_rows(int rows, const std::function<void(int, int)>& fn);
 
 // OpenGL ES 2.0 entry points (same names and semantics as gl2.h) --------------------------------
 void glActiveTexture(GLenum texture);

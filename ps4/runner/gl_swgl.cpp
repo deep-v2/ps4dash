@@ -186,11 +186,13 @@ bool swap_buffers() {
     // Wait until the buffer we're about to overwrite has been shown (it was flipped two frames ago).
     if (g_frame >= 2) wait_flip(g_frame - 1);
     uint32_t* dst = g_buffers[g_back];
-    for (int y = 0; y < h; y++) {   // GL rows are bottom-up; RGBA -> BGRA
-        const uint32_t* s = src + (size_t)(h - 1 - y) * w;
-        uint32_t* d = dst + (size_t)y * w;
-        for (int x = 0; x < w; x++) { uint32_t c = s[x]; d[x] = (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); }
-    }
+    swgl::parallel_rows(h, [&](int band, int nbands) {   // GL rows are bottom-up; RGBA -> BGRA
+        for (int y = band; y < h; y += nbands) {
+            const uint32_t* s = src + (size_t)(h - 1 - y) * w;
+            uint32_t* d = dst + (size_t)y * w;
+            for (int x = 0; x < w; x++) { uint32_t c = s[x]; d[x] = (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); }
+        }
+    });
     if (g_h.on_frame) g_h.on_frame();
     int cx, cy;
     if (g_h.cursor && g_h.cursor(&cx, &cy)) draw_cursor(dst, w, h, cx, cy);
@@ -202,15 +204,18 @@ bool swap_buffers() {
     swgl::FrameStats fs = swgl::take_frame_stats();
     g_acc_draw_ns += fs.draw_ns; g_acc_clear_ns += fs.clear_ns; g_acc_upload_ns += fs.upload_ns;
     g_acc_draws += fs.draws; g_acc_verts += fs.verts;
+    static uint64_t px_fast = 0, px_slow = 0;
+    px_fast += fs.px_fast; for (uint64_t v : fs.px_slow) px_slow += v;
     if (!g_last_report_us) g_last_report_us = t1;
     if (t1 - g_last_report_us >= 5000000) {
         double frame_ms = (t1 - g_last_report_us) / 1000.0 / g_frames;
         double draw = g_acc_draw_ns / 1e6 / g_frames, clear = g_acc_clear_ns / 1e6 / g_frames, up = g_acc_upload_ns / 1e6 / g_frames;
         double present = g_present_us / 1000.0 / g_frames;
-        log("gl: %.1f fps | per frame %.1f ms = draw %.1f + clear %.1f + upload %.1f + present %.1f + game/other %.1f | %ld draws, %ld verts\n",
-            1000.0 / frame_ms, frame_ms, draw, clear, up, present, frame_ms - draw - clear - up - present, g_acc_draws / g_frames, g_acc_verts / g_frames);
+        log("gl: %.1f fps | per frame %.1f ms = draw %.1f + clear %.1f + upload %.1f + present %.1f + game/other %.1f | %ld draws, %ld verts, %lluk px fast, %lluk px slow\n",
+            1000.0 / frame_ms, frame_ms, draw, clear, up, present, frame_ms - draw - clear - up - present, g_acc_draws / g_frames, g_acc_verts / g_frames,
+            (unsigned long long)(px_fast / g_frames / 1000), (unsigned long long)(px_slow / g_frames / 1000));
         g_frames = 0; g_present_us = 0; g_last_report_us = t1;
-        g_acc_draw_ns = g_acc_clear_ns = g_acc_upload_ns = 0; g_acc_draws = g_acc_verts = 0;
+        g_acc_draw_ns = g_acc_clear_ns = g_acc_upload_ns = 0; g_acc_draws = g_acc_verts = 0; px_fast = px_slow = 0;
     }
     return true;
 }
